@@ -1,0 +1,17 @@
+# Swift build artifacts
+native-app/.build/
+native-app/.swiftpm/
+
+# Xcode
+*.xcodeproj/xcuserdata/
+*.xcworkspace/xcuserdata/
+DerivedData/
+build/
+
+# macOS
+.DS_Store
+*.swp
+*~
+
+# Chrome extension unpacked (keep source, ignore generated)
+extension/icons/*.png.bak
