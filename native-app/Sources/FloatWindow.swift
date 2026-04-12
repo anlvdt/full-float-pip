@@ -63,6 +63,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var currentVideoTime: Double = 0
     private var hasInjectedJS = false
     private var loadingOverlay: NSView?
+    private var hasTriedYouTubeEmbedFallback = false
+    private var youtubeEmbedFallbackURL: URL?
+    private var youtubeFallbackWorkItem: DispatchWorkItem?
+    private var reinjectLayoutWorkItem: DispatchWorkItem?
 
     private enum LoadingStrategy {
         case directVideo, youtubeEmbed, siteEmbed, fullPageInject
@@ -135,6 +139,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
             object: self, queue: .main) { [weak self] _ in
             self?.saveWindowFrame()
+        }
+        NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification,
+            object: self, queue: .main) { [weak self] _ in
+            self?.scheduleInjectedLayoutRefresh()
         }
 
         // Key setting 3: Floating panel properties
@@ -435,6 +443,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         self.currentVideoTime = currentTime
         self.hasInjectedJS = false
         self.loadingStrategy = .fullPageInject
+        resetYouTubeFallbackState()
 
         // Suspend all media playback while overlay is visible, prevent audio during loading
         webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
@@ -448,24 +457,34 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             return
         }
 
-        // Priority 2: YouTube -- load via local HTTP server (provides valid Referer)
-        if site == "youtube" && httpServerPort > 0 {
-            if let videoId = extractYouTubeVideoId(from: url) {
-                self.loadingStrategy = .youtubeEmbed
-                let startSeconds = Int(currentTime)
-                let localURL = "http://127.0.0.1:\(httpServerPort)/play?v=\(videoId)&site=youtube&t=\(startSeconds)"
-                guard let serverURL = URL(string: localURL) else { return }
+        // Priority 2: YouTube -- prefer watch page + JS injection, keep embed as fallback
+        if site == "youtube" {
+            if let fallbackURL = buildYouTubeEmbedFallbackURL(
+                pageURL: url,
+                currentTime: currentTime,
+                httpServerPort: httpServerPort
+            ) {
+                youtubeEmbedFallbackURL = fallbackURL
+            }
 
-                // Inject cookies first, then load
+            if !url.isEmpty, let pageURL = URL(string: url) {
+                let loadPage = { [weak self] in
+                    self?.loadingStrategy = .fullPageInject
+                    self?.webView.load(URLRequest(url: pageURL))
+                    NSLog("[FloatVideo] Loading YouTube full page for JS injection: \(url)")
+                }
+
                 if !cookies.isEmpty {
-                    injectCookies(cookies) { [weak self] in
-                        self?.webView.load(URLRequest(url: serverURL))
-                        NSLog("[FloatVideo] Loading YouTube via local HTTP (with \(cookies.count) cookies): \(localURL)")
+                    injectCookies(cookies) {
+                        loadPage()
                     }
                 } else {
-                    webView.load(URLRequest(url: serverURL))
-                    NSLog("[FloatVideo] Loading YouTube via local HTTP (no cookies): \(localURL)")
+                    loadPage()
                 }
+                return
+            }
+
+            if startYouTubeEmbedFallback(reason: "missing-full-page-url") {
                 return
             }
         }
@@ -542,6 +561,117 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         return nil
     }
 
+    private func buildYouTubeEmbedFallbackURL(pageURL: String, currentTime: Double,
+                                              httpServerPort: UInt16) -> URL? {
+        guard httpServerPort > 0,
+              let videoId = extractYouTubeVideoId(from: pageURL) else {
+            return nil
+        }
+
+        let startSeconds = Int(currentTime)
+        let safeViewport = youtubeSafeViewportSize()
+        var components = URLComponents()
+        components.scheme = "http"
+        components.host = "127.0.0.1"
+        components.port = Int(httpServerPort)
+        components.path = "/play"
+        components.queryItems = [
+            URLQueryItem(name: "v", value: videoId),
+            URLQueryItem(name: "site", value: "youtube"),
+            URLQueryItem(name: "t", value: String(startSeconds)),
+            URLQueryItem(name: "w", value: String(Int(safeViewport.width))),
+            URLQueryItem(name: "h", value: String(Int(safeViewport.height))),
+        ]
+        return components.url
+    }
+
+    private func youtubeSafeViewportSize() -> NSSize {
+        let ratio = max(videoAspectRatio, 0.1)
+        let minViewport: CGFloat = 200
+        let recommendedLongEdge: CGFloat = 480
+        let recommendedShortEdge: CGFloat = 270
+
+        if ratio >= 1 {
+            let height = max(recommendedShortEdge, recommendedLongEdge / ratio, minViewport)
+            let width = max(height * ratio, recommendedLongEdge, minViewport)
+            return NSSize(width: ceil(width), height: ceil(height))
+        }
+
+        let width = max(recommendedShortEdge, recommendedLongEdge * ratio, minViewport)
+        let height = max(width / ratio, recommendedLongEdge, minViewport)
+        return NSSize(width: ceil(width), height: ceil(height))
+    }
+
+    private func resetYouTubeFallbackState() {
+        youtubeFallbackWorkItem?.cancel()
+        youtubeFallbackWorkItem = nil
+        reinjectLayoutWorkItem?.cancel()
+        reinjectLayoutWorkItem = nil
+        youtubeEmbedFallbackURL = nil
+        hasTriedYouTubeEmbedFallback = false
+    }
+
+    private func shouldUseYouTubeFullPagePrimary() -> Bool {
+        currentSite == "youtube"
+            && loadingStrategy == .fullPageInject
+            && youtubeEmbedFallbackURL != nil
+    }
+
+    private func scheduleInjectedLayoutRefresh(after delay: TimeInterval = 0.05) {
+        guard hasInjectedJS, loadingStrategy == .fullPageInject else { return }
+        reinjectLayoutWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            self?.refreshInjectedLayout()
+        }
+        reinjectLayoutWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    private func refreshInjectedLayout() {
+        guard hasInjectedJS, loadingStrategy == .fullPageInject else { return }
+        let js = "if (window.__floatVideoApplyLayout) { window.__floatVideoApplyLayout(); true } else { false }"
+        webView.evaluateJavaScript(js) { [weak self] result, error in
+            if let error = error {
+                NSLog("[FloatVideo] Layout refresh JS error: \(error)")
+                return
+            }
+            if let ok = result as? Bool, !ok {
+                self?.injectVideoMaximize(site: self?.currentSite ?? "generic",
+                                          currentTime: self?.currentVideoTime ?? 0)
+            }
+        }
+    }
+
+    private func scheduleYouTubeEmbedFallbackCheck(after delay: TimeInterval) {
+        guard shouldUseYouTubeFullPagePrimary() else { return }
+        youtubeFallbackWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self,
+                  self.shouldUseYouTubeFullPagePrimary(),
+                  !self.hasInjectedJS else { return }
+            _ = self.startYouTubeEmbedFallback(reason: "inject-timeout")
+        }
+        youtubeFallbackWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    @discardableResult
+    private func startYouTubeEmbedFallback(reason: String) -> Bool {
+        guard !hasTriedYouTubeEmbedFallback,
+              let fallbackURL = youtubeEmbedFallbackURL else {
+            return false
+        }
+
+        hasTriedYouTubeEmbedFallback = true
+        youtubeFallbackWorkItem?.cancel()
+        youtubeFallbackWorkItem = nil
+        loadingStrategy = .youtubeEmbed
+        hasInjectedJS = false
+        webView.load(URLRequest(url: fallbackURL))
+        NSLog("[FloatVideo] Switching YouTube to embed fallback (\(reason)): \(fallbackURL.absoluteString)")
+        return true
+    }
+
     // MARK: - WKNavigationDelegate
 
     func webView(_ webView: WKWebView, didFinish navigation: WKNavigation!) {
@@ -551,14 +681,19 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             // Full page load + JS inject: delay removing overlay after injection to let DOM operations complete
             guard !hasInjectedJS else { return }
             injectVideoMaximize(site: currentSite, currentTime: currentVideoTime)
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
-                self?.hideLoadingOverlay()
-            }
             for delay in [1.5, 3.0, 5.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     guard let self = self, !self.hasInjectedJS else { return }
                     self.injectVideoMaximize(site: self.currentSite,
                                              currentTime: self.currentVideoTime)
+                }
+            }
+            if shouldUseYouTubeFullPagePrimary() {
+                scheduleYouTubeEmbedFallbackCheck(after: 5.5)
+            } else {
+                DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+                    guard let self = self, self.loadingStrategy == .fullPageInject else { return }
+                    self.hideLoadingOverlay()
                 }
             }
         } else {
@@ -569,6 +704,17 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         NSLog("[FloatVideo] Page load failed: \(error)")
+        if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFail") {
+            return
+        }
+        hideLoadingOverlay()
+    }
+
+    func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
+        NSLog("[FloatVideo] Provisional page load failed: \(error)")
+        if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFailProvisional") {
+            return
+        }
         hideLoadingOverlay()
     }
 
@@ -634,36 +780,118 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         // Thorough JS injection: recursively traverse DOM tree, hide all elements not in the video's ancestor chain
         let js = """
         (function() {
-            const videos = document.querySelectorAll('video');
-            if (videos.length === 0) return false;
+            const site = '\(site)';
+            const initialTime = \(currentTime);
 
-            // Find the largest video element
-            let mainVideo = videos[0];
-            let maxArea = 0;
-            videos.forEach(v => {
-                const rect = v.getBoundingClientRect();
-                const area = rect.width * rect.height;
-                if (area > maxArea) {
-                    maxArea = area;
-                    mainVideo = v;
+            function findMainVideo() {
+                const videos = Array.from(document.querySelectorAll('video'));
+                if (videos.length === 0) return null;
+                if (window.__floatVideoMainVideo && document.contains(window.__floatVideoMainVideo)) {
+                    return window.__floatVideoMainVideo;
                 }
-            });
 
-            // Build ancestor chain set for the video
-            const ancestors = new Set();
-            let current = mainVideo;
-            while (current) {
-                ancestors.add(current);
-                current = current.parentElement;
+                let mainVideo = videos[0];
+                let maxArea = 0;
+                videos.forEach(v => {
+                    const rect = v.getBoundingClientRect();
+                    const area = rect.width * rect.height;
+                    if (area > maxArea) {
+                        maxArea = area;
+                        mainVideo = v;
+                    }
+                });
+                window.__floatVideoMainVideo = mainVideo;
+                return mainVideo;
             }
 
-            // Recursively hide all elements not in the ancestor chain
-            function hideNonAncestors(element) {
+            function ensureFloatVideoStyle() {
+                const styleId = '__floatvideo-style';
+                let styleEl = document.getElementById(styleId);
+                if (!styleEl) {
+                    styleEl = document.createElement('style');
+                    styleEl.id = styleId;
+                    (document.head || document.documentElement).appendChild(styleEl);
+                }
+
+                const youtubeCss = site === 'youtube' ? `
+                    ytd-app, ytd-watch-flexy, #page-manager, #content, #columns, #primary,
+                    #primary-inner, #player, #player-container, #player-full-bleed-container,
+                    #full-bleed-container, #movie_player, .html5-video-player,
+                    .html5-video-container {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        background: #000 !important;
+                        transform: none !important;
+                        filter: none !important;
+                        transition: none !important;
+                        overflow: hidden !important;
+                    }
+                    #secondary, #masthead-container, #below, #related, #chat,
+                    .ytp-chrome-top, .ytp-chrome-bottom, .ytp-gradient-top,
+                    .ytp-gradient-bottom, .ytp-ce-element, .ytp-pause-overlay,
+                    .ytp-cards-teaser, .ytp-paid-content-overlay, [class*="ytp-ce-"] {
+                        display: none !important;
+                        visibility: hidden !important;
+                        opacity: 0 !important;
+                    }
+                ` : '';
+
+                styleEl.textContent = `
+                    html, body {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        overflow: hidden !important;
+                        background: #000 !important;
+                        width: 100% !important;
+                        height: 100% !important;
+                    }
+                    .__floatvideo-ancestor {
+                        display: block !important;
+                        visibility: visible !important;
+                        opacity: 1 !important;
+                        position: static !important;
+                        overflow: visible !important;
+                        max-width: none !important;
+                        max-height: none !important;
+                        width: 100% !important;
+                        height: 100% !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        background: #000 !important;
+                        transform: none !important;
+                        filter: none !important;
+                        transition: none !important;
+                    }
+                    video.__floatvideo-main-video {
+                        position: fixed !important;
+                        inset: 0 !important;
+                        width: 100vw !important;
+                        height: 100vh !important;
+                        left: 0 !important;
+                        top: 0 !important;
+                        right: auto !important;
+                        bottom: auto !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        min-width: 0 !important;
+                        min-height: 0 !important;
+                        max-width: none !important;
+                        max-height: none !important;
+                        object-fit: contain !important;
+                        object-position: center center !important;
+                        transform: none !important;
+                        background: #000 !important;
+                        z-index: 2147483647 !important;
+                    }
+                    ${youtubeCss}
+                `;
+            }
+
+            function hideNonAncestors(element, ancestors, mainVideo) {
                 if (!element || !element.children) return;
                 Array.from(element.children).forEach(child => {
                     if (child === mainVideo) return;
                     if (ancestors.has(child)) {
-                        // This child is in the ancestor chain, keep visible but continue traversing down
                         child.style.setProperty('display', '', 'important');
                         child.style.setProperty('visibility', 'visible', 'important');
                         child.style.setProperty('opacity', '1', 'important');
@@ -675,36 +903,109 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                         child.style.setProperty('height', '100%', 'important');
                         child.style.setProperty('margin', '0', 'important');
                         child.style.setProperty('padding', '0', 'important');
-                        hideNonAncestors(child);
+                        hideNonAncestors(child, ancestors, mainVideo);
                     } else {
-                        // Not in the ancestor chain, hide it
                         child.style.setProperty('display', 'none', 'important');
                     }
                 });
             }
 
-            document.documentElement.style.cssText = 'margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;';
-            document.body.style.cssText = 'margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;';
+            function applyLayout() {
+                if (window.__floatVideoApplyingLayout) return false;
+                const mainVideo = findMainVideo();
+                if (!mainVideo) return false;
+                window.__floatVideoApplyingLayout = true;
 
-            hideNonAncestors(document.body);
+                try {
+                    ensureFloatVideoStyle();
 
-            // Make the video element fullscreen
-            mainVideo.style.cssText = 'position:fixed!important;top:0!important;left:0!important;width:100vw!important;height:100vh!important;object-fit:contain!important;z-index:2147483647!important;background:#000!important;max-width:none!important;max-height:none!important;';
+                    document.querySelectorAll('.__floatvideo-ancestor').forEach(el => {
+                        el.classList.remove('__floatvideo-ancestor');
+                    });
+                    document.querySelectorAll('.__floatvideo-main-video').forEach(el => {
+                        el.classList.remove('__floatvideo-main-video');
+                    });
 
-            // Remove all overlays and modals
-            document.querySelectorAll('[class*="overlay"], [class*="modal"], [class*="popup"], [id*="overlay"]').forEach(el => {
-                if (!ancestors.has(el)) {
-                    el.style.setProperty('display', 'none', 'important');
+                    const ancestors = new Set();
+                    let current = mainVideo;
+                    while (current) {
+                        ancestors.add(current);
+                        if (current.classList) {
+                            current.classList.add('__floatvideo-ancestor');
+                        }
+                        current = current.parentElement;
+                    }
+
+                    document.documentElement.style.cssText = 'margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;';
+                    document.body.style.cssText = 'margin:0!important;padding:0!important;overflow:hidden!important;background:#000!important;width:100%!important;height:100%!important;';
+
+                    hideNonAncestors(document.body, ancestors, mainVideo);
+
+                    if (site === 'youtube') {
+                        ancestors.forEach(el => {
+                            if (el !== mainVideo) {
+                                el.style.setProperty('transform', 'none', 'important');
+                                el.style.setProperty('filter', 'none', 'important');
+                                el.style.setProperty('transition', 'none', 'important');
+                                el.style.setProperty('background', '#000', 'important');
+                            }
+                        });
+                    }
+
+                    mainVideo.classList.add('__floatvideo-main-video');
+                    mainVideo.style.setProperty('position', 'fixed', 'important');
+                    mainVideo.style.setProperty('inset', '0', 'important');
+                    mainVideo.style.setProperty('width', '100vw', 'important');
+                    mainVideo.style.setProperty('height', '100vh', 'important');
+                    mainVideo.style.setProperty('left', '0', 'important');
+                    mainVideo.style.setProperty('top', '0', 'important');
+                    mainVideo.style.setProperty('object-fit', 'contain', 'important');
+                    mainVideo.style.setProperty('object-position', 'center center', 'important');
+                    mainVideo.style.setProperty('transform', 'none', 'important');
+                    mainVideo.style.setProperty('margin', '0', 'important');
+                    mainVideo.style.setProperty('padding', '0', 'important');
+                    mainVideo.style.setProperty('background', '#000', 'important');
+                    mainVideo.setAttribute('playsinline', '');
+
+                    if (!window.__floatVideoInitialSeekDone && initialTime > 0) {
+                        try {
+                            mainVideo.currentTime = initialTime;
+                        } catch (e) {}
+                        window.__floatVideoInitialSeekDone = true;
+                    }
+
+                    mainVideo.play().catch(() => {});
+                    mainVideo.controls = site === 'youtube' ? false : true;
+                    window.__floatVideoMainVideo = mainVideo;
+                    return true;
+                } finally {
+                    window.__floatVideoApplyingLayout = false;
                 }
-            });
-
-            // Play
-            if (\(currentTime) > 0) {
-                mainVideo.currentTime = \(currentTime);
             }
-            mainVideo.play().catch(() => {});
-            mainVideo.controls = true;
-            return true;
+
+            window.__floatVideoApplyLayout = applyLayout;
+
+            if (!window.__floatVideoResizeHookInstalled) {
+                window.__floatVideoResizeHookInstalled = true;
+                let delayedLayoutPass = null;
+                window.addEventListener('resize', () => {
+                    if (delayedLayoutPass) {
+                        clearTimeout(delayedLayoutPass);
+                    }
+                    delayedLayoutPass = setTimeout(() => {
+                        if (window.__floatVideoApplyLayout) {
+                            window.__floatVideoApplyLayout();
+                        }
+                    }, 0);
+                    setTimeout(() => {
+                        if (window.__floatVideoApplyLayout) {
+                            window.__floatVideoApplyLayout();
+                        }
+                    }, 120);
+                });
+            }
+
+            return applyLayout();
         })();
         """
         webView.evaluateJavaScript(js) { [weak self] result, err in
@@ -712,6 +1013,11 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 NSLog("[FloatVideo] JS injection error: \(err)")
             } else if let found = result as? Bool, found {
                 self?.hasInjectedJS = true
+                self?.youtubeFallbackWorkItem?.cancel()
+                self?.youtubeFallbackWorkItem = nil
+                if self?.shouldUseYouTubeFullPagePrimary() == true {
+                    self?.hideLoadingOverlay()
+                }
             }
         }
     }
@@ -805,6 +1111,9 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     @objc func closeWindow() {
         cursorPollTimer?.invalidate()
         cursorPollTimer = nil
+        resetYouTubeFallbackState()
+        reinjectLayoutWorkItem?.cancel()
+        reinjectLayoutWorkItem = nil
         stopUpdateTimer()
         saveWindowFrame()
         onClose?()

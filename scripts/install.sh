@@ -41,7 +41,11 @@ echo "[3/4] Configuring Native Messaging..."
 
 cat > "$INSTALL_DIR/float_video_host.sh" << HOSTEOF
 #!/bin/bash
-exec "$INSTALL_DIR/FloatVideo" --native-messaging
+LOG_DIR="\$HOME/Library/Logs/FloatVideo"
+LOG_FILE="\$LOG_DIR/native-host.log"
+mkdir -p "\$LOG_DIR"
+printf '\n[%s] starting native host pid=%s\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$\$" >> "\$LOG_FILE"
+exec "$INSTALL_DIR/FloatVideo" --native-messaging 2>>"\$LOG_FILE"
 HOSTEOF
 chmod +x "$INSTALL_DIR/float_video_host.sh"
 
@@ -88,6 +92,7 @@ echo "================================="
 echo ""
 echo "  Native app: $INSTALL_DIR/FloatVideo"
 echo "  Messaging manifest: $NATIVE_HOST_DIR/com.aspect.floatvideo.json"
+echo "  Host stderr log: $HOME/Library/Logs/FloatVideo/native-host.log"
 echo "  Chrome extension: $PROJECT_DIR/extension"
 echo ""
 echo "  Usage:"

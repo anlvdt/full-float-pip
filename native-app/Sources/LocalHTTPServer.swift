@@ -103,6 +103,8 @@ class LocalHTTPServer {
         let videoId = queryItems.first(where: { $0.name == "v" })?.value ?? ""
         let site = queryItems.first(where: { $0.name == "site" })?.value ?? "youtube"
         let startTime = queryItems.first(where: { $0.name == "t" })?.value ?? "0"
+        let safeWidth = max(Int(queryItems.first(where: { $0.name == "w" })?.value ?? "") ?? 640, 200)
+        let safeHeight = max(Int(queryItems.first(where: { $0.name == "h" })?.value ?? "") ?? 360, 200)
 
         if videoId.isEmpty {
             sendErrorResponse(connection: connection, code: 400, message: "Missing video ID")
@@ -112,7 +114,12 @@ class LocalHTTPServer {
         let html: String
         switch site {
         case "youtube":
-            html = buildYouTubePlayerHTML(videoId: videoId, startTime: startTime)
+            html = buildYouTubePlayerHTML(
+                videoId: videoId,
+                startTime: startTime,
+                safeWidth: safeWidth,
+                safeHeight: safeHeight
+            )
         default:
             html = buildGenericEmbedHTML(videoId: videoId)
         }
@@ -122,7 +129,10 @@ class LocalHTTPServer {
 
     // MARK: - YouTube Player HTML
 
-    private func buildYouTubePlayerHTML(videoId: String, startTime: String) -> String {
+    private func buildYouTubePlayerHTML(videoId: String, startTime: String,
+                                        safeWidth: Int, safeHeight: Int) -> String {
+        let startSeconds = max(Int(startTime) ?? 0, 0)
+        let origin = "http://127.0.0.1:\(port)"
         return """
         <!DOCTYPE html>
         <html>
@@ -133,82 +143,135 @@ class LocalHTTPServer {
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-                .wrap {
-                    position: fixed; top: 0; left: 0;
-                    width: 960px; height: 540px;
+                #stage {
+                    position: fixed;
+                    top: 0;
+                    left: 0;
+                    width: \(safeWidth)px;
+                    height: \(safeHeight)px;
                     transform-origin: top left;
                     transform: scale(1);
+                    background: #000;
                 }
-                iframe {
-                    width: 100%; height: 100%;
-                    border: none; display: block;
+                #ytplayer {
+                    width: 100%;
+                    height: 100%;
+                    background: #000;
+                }
+                #stage iframe {
+                    display: block;
+                    border: none;
                 }
             </style>
         </head>
         <body>
-            <div class="wrap">
-                <iframe id="ytplayer"
-                    src="https://www.youtube.com/embed/\(videoId)?autoplay=1&enablejsapi=1&controls=0&rel=0&modestbranding=1&start=\(startTime)&playsinline=1"
-                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                    referrerpolicy="strict-origin-when-cross-origin"
-                    allowfullscreen>
-                </iframe>
+            <div id="stage">
+                <div id="ytplayer"></div>
             </div>
             <script>
-            // Scale-to-fit: render YouTube iframe at 960x540 internally (a clean
-            // size for YouTube's player layout) and use CSS transform:scale() to
-            // visually shrink to fit when the window is smaller. Prevents YouTube's
-            // internal layout from reflowing and leaving a black bar at small sizes.
+            var SAFE_W = \(safeWidth);
+            var SAFE_H = \(safeHeight);
             (function() {
-                var BASE_W = 960, BASE_H = 540;
-                function fit() {
-                    var vw = window.innerWidth, vh = window.innerHeight;
-                    var wrap = document.querySelector('.wrap');
-                    if (!wrap) return;
-                    if (vw < BASE_W || vh < BASE_H) {
-                        wrap.style.width = BASE_W + 'px';
-                        wrap.style.height = BASE_H + 'px';
-                        var s = Math.min(vw / BASE_W, vh / BASE_H);
-                        wrap.style.transform = 'scale(' + s + ')';
-                    } else {
-                        wrap.style.width = vw + 'px';
-                        wrap.style.height = vh + 'px';
-                        wrap.style.transform = 'scale(1)';
+                var stage = document.getElementById('stage');
+                window.player = null;
+
+                function getLayout() {
+                    var vw = Math.max(window.innerWidth || 0, 1);
+                    var vh = Math.max(window.innerHeight || 0, 1);
+                    if (vw < SAFE_W || vh < SAFE_H) {
+                        return {
+                            viewportWidth: vw,
+                            viewportHeight: vh,
+                            playerWidth: SAFE_W,
+                            playerHeight: SAFE_H,
+                            scale: Math.min(vw / SAFE_W, vh / SAFE_H)
+                        };
+                    }
+                    return {
+                        viewportWidth: vw,
+                        viewportHeight: vh,
+                        playerWidth: vw,
+                        playerHeight: vh,
+                        scale: 1
+                    };
+                }
+
+                function applyLayout(layout) {
+                    stage.style.width = layout.playerWidth + 'px';
+                    stage.style.height = layout.playerHeight + 'px';
+                    stage.style.transform = 'scale(' + layout.scale + ')';
+                    stage.style.left = Math.round((layout.viewportWidth - layout.playerWidth * layout.scale) / 2) + 'px';
+                    stage.style.top = Math.round((layout.viewportHeight - layout.playerHeight * layout.scale) / 2) + 'px';
+
+                    if (window.player && window.player.setSize) {
+                        window.player.setSize(
+                            Math.round(layout.playerWidth),
+                            Math.round(layout.playerHeight)
+                        );
                     }
                 }
-                window.addEventListener('resize', fit);
-                fit();
+
+                window.fitYouTubePlayer = function() {
+                    applyLayout(getLayout());
+                };
+
+                window.addEventListener('resize', window.fitYouTubePlayer);
+                window.fitYouTubePlayer();
             })();
             var tag = document.createElement('script');
             tag.src = 'https://www.youtube.com/iframe_api';
             document.head.appendChild(tag);
-            var player;
             function onYouTubeIframeAPIReady() {
-                player = new YT.Player('ytplayer', {
-                    events: { 'onReady': function(){} }
+                var initialLayout = (function() {
+                    var vw = Math.max(window.innerWidth || 0, 1);
+                    var vh = Math.max(window.innerHeight || 0, 1);
+                    if (vw < SAFE_W || vh < SAFE_H) {
+                        return { width: SAFE_W, height: SAFE_H };
+                    }
+                    return { width: vw, height: vh };
+                })();
+
+                window.player = new YT.Player('ytplayer', {
+                    width: initialLayout.width,
+                    height: initialLayout.height,
+                    videoId: '\(videoId)',
+                    playerVars: {
+                        autoplay: 1,
+                        controls: 0,
+                        rel: 0,
+                        modestbranding: 1,
+                        start: \(startSeconds),
+                        playsinline: 1,
+                        origin: '\(origin)'
+                    },
+                    events: {
+                        'onReady': function() {
+                            window.fitYouTubePlayer();
+                        }
+                    }
                 });
             }
             window.getPlayerState = function() {
-                if (!player || !player.getCurrentTime) return null;
+                if (!window.player || !window.player.getCurrentTime) return null;
                 try {
                     return {
-                        ct: player.getCurrentTime(),
-                        dur: player.getDuration(),
-                        vol: player.getVolume() / 100,
-                        muted: player.isMuted(),
-                        paused: player.getPlayerState() === 2
+                        ct: window.player.getCurrentTime(),
+                        dur: window.player.getDuration(),
+                        vol: window.player.getVolume() / 100,
+                        muted: window.player.isMuted(),
+                        paused: window.player.getPlayerState() === 2
                     };
                 } catch(e) { return null; }
             };
             window.playerCommand = function(cmd, val) {
-                if (!player) return;
+                if (!window.player) return;
                 try {
-                    if (cmd === 'play') player.playVideo();
-                    if (cmd === 'pause') player.pauseVideo();
-                    if (cmd === 'seek') player.seekTo(val, true);
-                    if (cmd === 'volume') player.setVolume(val * 100);
-                    if (cmd === 'mute') player.mute();
-                    if (cmd === 'unmute') player.unMute();
+                    if (cmd === 'play') window.player.playVideo();
+                    if (cmd === 'pause') window.player.pauseVideo();
+                    if (cmd === 'seek') window.player.seekTo(val, true);
+                    if (cmd === 'volume') window.player.setVolume(val * 100);
+                    if (cmd === 'mute') window.player.mute();
+                    if (cmd === 'unmute') window.player.unMute();
                 } catch(e) {}
             };
             </script>

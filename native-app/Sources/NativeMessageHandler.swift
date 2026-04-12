@@ -14,6 +14,46 @@ class NativeMessageHandler {
     private var isListening = false
     private let outputQueue = DispatchQueue(label: "com.aspect.floatvideo.output")
 
+    private func truncated(_ value: String, maxLength: Int = 120) -> String {
+        guard value.count > maxLength else { return value }
+        return String(value.prefix(maxLength)) + "..."
+    }
+
+    private func summarizeIncomingMessage(_ message: [String: Any]) -> String {
+        let action = message["action"] as? String ?? "unknown"
+        switch action {
+        case "open":
+            let site = message["site"] as? String ?? "generic"
+            let url = truncated(message["url"] as? String ?? "")
+            let width = message["width"] ?? "?"
+            let height = message["height"] ?? "?"
+            let currentTime = message["currentTime"] ?? 0
+            let hasVideoSrc = !((message["videoSrc"] as? String ?? "").isEmpty)
+            let hasEmbedURL = !((message["embedUrl"] as? String ?? "").isEmpty)
+            let cookieCount = (message["cookies"] as? [[String: Any]])?.count ?? 0
+            return "action=open site=\(site) size=\(width)x\(height) time=\(currentTime) videoSrc=\(hasVideoSrc) embedUrl=\(hasEmbedURL) cookies=\(cookieCount) url=\(url)"
+        case "close", "ping":
+            return "action=\(action)"
+        default:
+            return "action=\(action) keys=\(message.keys.sorted())"
+        }
+    }
+
+    private func summarizeOutgoingMessage(_ message: [String: Any]) -> String {
+        let type = message["type"] as? String ?? "unknown"
+        switch type {
+        case "status":
+            let status = message["status"] as? String ?? "unknown"
+            let title = truncated(message["title"] as? String ?? "")
+            return title.isEmpty ? "type=status status=\(status)" : "type=status status=\(status) title=\(title)"
+        case "error":
+            let error = truncated(message["error"] as? String ?? "")
+            return "type=error error=\(error)"
+        default:
+            return "type=\(type) keys=\(message.keys.sorted())"
+        }
+    }
+
     // MARK: - Listening
 
     func startListening() {
@@ -79,7 +119,7 @@ class NativeMessageHandler {
                 NSLog("[FloatVideo] Message is not a JSON object")
                 return nil
             }
-            NSLog("[FloatVideo] Received message: \(json)")
+            NSLog("[FloatVideo] Received message summary: \(summarizeIncomingMessage(json))")
             return json
         } catch {
             NSLog("[FloatVideo] JSON parse error: \(error)")
@@ -104,7 +144,7 @@ class NativeMessageHandler {
                 self.outputHandle.write(lengthData)
                 self.outputHandle.write(jsonData)
 
-                NSLog("[FloatVideo] Sent message: \(message)")
+                NSLog("[FloatVideo] Sent message summary: \(self.summarizeOutgoingMessage(message))")
             } catch {
                 NSLog("[FloatVideo] Failed to serialize message: \(error)")
             }
