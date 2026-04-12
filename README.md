@@ -8,6 +8,12 @@ The only Chrome extension that creates truly always-on-top floating video window
 
 > No other PiP tool, Chrome extension, or browser feature can float a video over a macOS fullscreen app. FullFloatPiP can.
 
+<p align="center">
+  <img src="docs/demo.png" alt="FullFloatPiP floating over a fullscreen Terminal" width="640">
+  <br>
+  <sub><i>The FullFloatPiP window floating above a fullscreen Terminal — browser is not even visible, and the video keeps playing.</i></sub>
+</p>
+
 ## Why FullFloatPiP?
 
 Every existing PiP solution fails when you go fullscreen:

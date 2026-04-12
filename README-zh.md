@@ -8,6 +8,12 @@
 
 > 没有任何其他画中画工具、Chrome 扩展或浏览器功能能让视频浮在 macOS 全屏应用之上。FullFloatPiP 可以。
 
+<p align="center">
+  <img src="docs/demo.png" alt="FullFloatPiP 浮在全屏 Terminal 之上" width="640">
+  <br>
+  <sub><i>FullFloatPiP 窗口浮在全屏 Terminal 之上——浏览器都不在屏幕上，视频依然持续播放。</i></sub>
+</p>
+
 ## 为什么选择 FullFloatPiP？
 
 所有现有的画中画方案在你切到全屏时都会失效：
