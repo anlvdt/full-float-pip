@@ -133,21 +133,52 @@ class LocalHTTPServer {
             <style>
                 * { margin: 0; padding: 0; box-sizing: border-box; }
                 html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
-                iframe {
+                .wrap {
                     position: fixed; top: 0; left: 0;
-                    width: 100vw; height: 100vh;
-                    border: none;
+                    width: 960px; height: 540px;
+                    transform-origin: top left;
+                    transform: scale(1);
+                }
+                iframe {
+                    width: 100%; height: 100%;
+                    border: none; display: block;
                 }
             </style>
         </head>
         <body>
-            <iframe id="ytplayer"
-                src="https://www.youtube.com/embed/\(videoId)?autoplay=1&enablejsapi=1&rel=0&modestbranding=1&start=\(startTime)&playsinline=1"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerpolicy="strict-origin-when-cross-origin"
-                allowfullscreen>
-            </iframe>
+            <div class="wrap">
+                <iframe id="ytplayer"
+                    src="https://www.youtube.com/embed/\(videoId)?autoplay=1&enablejsapi=1&controls=0&rel=0&modestbranding=1&start=\(startTime)&playsinline=1"
+                    allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
+                    referrerpolicy="strict-origin-when-cross-origin"
+                    allowfullscreen>
+                </iframe>
+            </div>
             <script>
+            // Scale-to-fit: render YouTube iframe at 960x540 internally (a clean
+            // size for YouTube's player layout) and use CSS transform:scale() to
+            // visually shrink to fit when the window is smaller. Prevents YouTube's
+            // internal layout from reflowing and leaving a black bar at small sizes.
+            (function() {
+                var BASE_W = 960, BASE_H = 540;
+                function fit() {
+                    var vw = window.innerWidth, vh = window.innerHeight;
+                    var wrap = document.querySelector('.wrap');
+                    if (!wrap) return;
+                    if (vw < BASE_W || vh < BASE_H) {
+                        wrap.style.width = BASE_W + 'px';
+                        wrap.style.height = BASE_H + 'px';
+                        var s = Math.min(vw / BASE_W, vh / BASE_H);
+                        wrap.style.transform = 'scale(' + s + ')';
+                    } else {
+                        wrap.style.width = vw + 'px';
+                        wrap.style.height = vh + 'px';
+                        wrap.style.transform = 'scale(1)';
+                    }
+                }
+                window.addEventListener('resize', fit);
+                fit();
+            })();
             var tag = document.createElement('script');
             tag.src = 'https://www.youtube.com/iframe_api';
             document.head.appendChild(tag);

@@ -73,9 +73,11 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     var onClose: (() -> Void)?
 
-    // For hover show/hide control bar
+    // For hover show/hide control bar (cursor-position polling)
     private var isHovering = false
     private var hideTimer: DispatchWorkItem?
+    private var cursorPollTimer: Timer?
+    private var cursorWasInside = false
 
     // For window resize dragging
     private var initialMouseLocation: NSPoint = .zero
@@ -721,9 +723,43 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         titleBarView.alphaValue = 1.0
         self.orderFrontRegardless()
         self.makeKeyAndOrderFront(nil)
+        // Start cursor-position polling for reliable auto-hide (event-based
+        // approaches fail on non-activating panels and under WKWebView).
+        startCursorPolling()
         // Safety: hide loading overlay after 8s regardless
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             self?.hideLoadingOverlay()
+        }
+    }
+
+    private func startCursorPolling() {
+        cursorPollTimer?.invalidate()
+        cursorPollTimer = Timer.scheduledTimer(withTimeInterval: 0.3, repeats: true) { [weak self] _ in
+            self?.pollCursorPosition()
+        }
+    }
+
+    private func pollCursorPosition() {
+        let cursor = NSEvent.mouseLocation
+        let inside = self.frame.contains(cursor)
+
+        if isResizing {
+            // Keep controls visible during resize; no hide scheduling.
+            if !isHovering { showControls() }
+            hideTimer?.cancel()
+            hideTimer = nil
+            cursorWasInside = inside
+            return
+        }
+
+        if inside && !cursorWasInside {
+            cursorWasInside = true
+            hideTimer?.cancel()
+            hideTimer = nil
+            if !isHovering { showControls() }
+        } else if !inside && cursorWasInside {
+            cursorWasInside = false
+            if isHovering { scheduleHideControls() }
         }
     }
 
@@ -767,6 +803,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     @objc func closeWindow() {
+        cursorPollTimer?.invalidate()
+        cursorPollTimer = nil
         stopUpdateTimer()
         saveWindowFrame()
         onClose?()
@@ -796,7 +834,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     private func hideControls() {
-        guard isHovering, !isResizing else { return }
+        guard isHovering else { return }
+        if isResizing {
+            // Can't hide during resize; reschedule so controls hide once resize ends
+            scheduleHideControls()
+            return
+        }
         isHovering = false
         NSAnimationContext.runAnimationGroup({ context in
             context.duration = 0.3
@@ -1025,13 +1068,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     // MARK: - Mouse Handling
 
-    override func mouseEntered(with event: NSEvent) {
-        showControls()
-        super.mouseEntered(with: event)
-    }
-
     override func mouseMoved(with event: NSEvent) {
-        showControls()
+        // Show/hide driven by cursor polling; only update resize cursor here.
         let location = event.locationInWindow
         let edge = detectResizeEdge(at: location)
         cursorForEdge(edge).set()
@@ -1110,7 +1148,6 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         if !isResizing {
             NSCursor.arrow.set()
         }
-        scheduleHideControls()
         super.mouseExited(with: event)
     }
 

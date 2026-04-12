@@ -72,6 +72,18 @@ class FloatVideoManager {
             return { success: false, error: 'Native app not connected. Please run install.sh first.' };
         }
 
+        // Proportional fit into [320..960] × [180..540] preserving aspect ratio
+        // Independent clamping would distort non-16:9 videos before the native
+        // app locks the aspect ratio.
+        const origW = videoInfo.width || 640;
+        const origH = videoInfo.height || 360;
+        const ratio = origW / origH;
+        const downscale = Math.min(960 / origW, 540 / origH, 1);
+        let w = Math.round(origW * downscale);
+        let h = Math.round(origH * downscale);
+        if (w < 320) { w = 320; h = Math.round(w / ratio); }
+        if (h < 180) { h = 180; w = Math.round(h * ratio); }
+
         const message = {
             action: 'open',
             url: videoInfo.pageUrl,
@@ -79,8 +91,8 @@ class FloatVideoManager {
             embedUrl: videoInfo.embedUrl || '',
             title: videoInfo.title || 'Float Video',
             site: videoInfo.site || 'generic',
-            width: Math.min(Math.max(videoInfo.width || 640, 320), 960),
-            height: Math.min(Math.max(videoInfo.height || 360, 180), 540),
+            width: w,
+            height: h,
             currentTime: videoInfo.currentTime || 0,
         };
 
