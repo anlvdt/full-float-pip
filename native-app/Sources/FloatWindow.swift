@@ -55,13 +55,15 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var updateTimer: Timer?
     private var videoTitle: String
     private var isPlaying = true
-    private var isMuted = false
+    private var userWantsMute = false
     private var videoAspectRatio: CGFloat = 16.0 / 9.0
 
     // Video loading parameters (used by WKNavigationDelegate callbacks)
     private var currentSite: String = "generic"
     private var currentVideoTime: Double = 0
     private var hasInjectedJS = false
+    private var hasInjectedAdSkip = false
+    private var lastAdSkipCount = 0
     private var loadingOverlay: NSView?
     private var hasTriedYouTubeEmbedFallback = false
     private var youtubeEmbedFallbackURL: URL?
@@ -681,6 +683,11 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             // Full page load + JS inject: delay removing overlay after injection to let DOM operations complete
             guard !hasInjectedJS else { return }
             injectVideoMaximize(site: currentSite, currentTime: currentVideoTime)
+            // Auto-skip YouTube ads. Idempotent in-page guard (installs a single
+            // interval); safe to call alongside the injection retries below.
+            if shouldUseYouTubeFullPagePrimary() {
+                injectAdSkip()
+            }
             for delay in [1.5, 3.0, 5.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
                     guard let self = self, !self.hasInjectedJS else { return }
@@ -1022,6 +1029,70 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         }
     }
 
+    /// Installs a self-contained, idempotent in-page guard that auto-clicks
+    /// YouTube's "Skip Ad" button the instant it becomes available.
+    ///
+    /// Why this is needed: the full-page isolation injection (`injectVideoMaximize`)
+    /// hides every element that isn't an ancestor of the <video>, which includes
+    /// YouTube's ad container and the Skip button it creates ~15s into an ad. The
+    /// button still exists in the DOM, so `HTMLElement.click()` fires its handler
+    /// even while it is `display:none` — no CSS/z-index/layout changes required.
+    ///
+    /// Limitation: this only reaches the same-origin YouTube watch page loaded via
+    /// the `.fullPageInject` primary path. The cross-origin IFrame-API fallback
+    /// (LocalHTTPServer) hosts YouTube in an <iframe> whose ad DOM is unreachable,
+    /// so auto-skip does not apply there.
+    private func injectAdSkip() {
+        let js = """
+        (function() {
+            if (window.__floatVideoAdSkipInstalled) return true;
+            window.__floatVideoAdSkipInstalled = true;
+            window.__floatVideoAdSkipCount = window.__floatVideoAdSkipCount || 0;
+
+            // Covers old + modern YouTube ad-skip markup.
+            var SKIP_SELECTORS = [
+                '.ytp-ad-skip-button-modern',
+                '.ytp-ad-skip-button',
+                '.ytp-skip-ad-button',
+                '.ytp-ad-skip-button-slot button',
+                '.ytp-ad-skip-button-container button'
+            ];
+
+            function findSkipButton() {
+                for (var i = 0; i < SKIP_SELECTORS.length; i++) {
+                    var el = document.querySelector(SKIP_SELECTORS[i]);
+                    if (!el) continue;
+                    // Only click a genuinely enabled skip control. YouTube only
+                    // inserts the real button once skipping is allowed, but guard
+                    // against disabled/aria-disabled states just in case.
+                    if (el.disabled) continue;
+                    if (el.getAttribute('aria-disabled') === 'true') continue;
+                    return el;
+                }
+                return null;
+            }
+
+            window.__floatVideoAdSkipTimer = setInterval(function() {
+                var btn = findSkipButton();
+                if (btn) {
+                    btn.click();
+                    window.__floatVideoAdSkipCount++;
+                }
+            }, 500);
+
+            return true;
+        })();
+        """
+        webView.evaluateJavaScript(js) { [weak self] _, err in
+            if let err = err {
+                NSLog("[FloatVideo] Ad-skip guard injection error: \(err)")
+            } else {
+                self?.hasInjectedAdSkip = true
+                NSLog("[FloatVideo] Ad-skip guard installed")
+            }
+        }
+    }
+
     // MARK: - Window Actions
 
     func show() {
@@ -1093,9 +1164,23 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     private func triggerPlayback() {
-        // Trigger playback for all video elements + trigger YouTube iframe playback via postMessage
+        // Trigger playback for all video elements + trigger YouTube iframe playback via postMessage.
+        // Also assert the user's mute intent — WKWebView's autoplay policy will often force
+        // audio off without an explicit unmute, and YouTube re-mutes around ad transitions.
+        let wantMute = userWantsMute
+        let mutedJSBool = wantMute ? "true" : "false"
+        let ytMuteCmd = wantMute ? "'mute'" : "'unmute'"
         let js = """
-        document.querySelectorAll('video').forEach(v => v.play().catch(() => {}));
+        document.querySelectorAll('video').forEach(v => {
+            v.muted = \(mutedJSBool);
+            if (!\(mutedJSBool)) v.volume = 1.0;
+            v.play().catch(() => {});
+        });
+        if (window.playerCommand) {
+            window.playerCommand(\(ytMuteCmd));
+            if (!\(mutedJSBool)) window.playerCommand('volume', 1.0);
+            window.playerCommand('play');
+        }
         var iframe = document.querySelector('iframe');
         if (iframe) {
             iframe.contentWindow.postMessage(JSON.stringify({event:'command',func:'playVideo',args:[]}), '*');
@@ -1211,21 +1296,26 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     @objc func toggleMute() {
-        isMuted.toggle()
-        if isMuted {
+        userWantsMute.toggle()
+        if userWantsMute {
             videoJS("v.muted = true", youtubeCmd: "playerCommand('mute')")
             setButtonSymbol(volumeButton, "speaker.slash.fill")
+            volumeSlider.doubleValue = 0
         } else {
-            videoJS("v.muted = false", youtubeCmd: "playerCommand('unmute')")
+            videoJS("v.muted = false; v.volume = 1.0",
+                    youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)")
             setButtonSymbol(volumeButton, "speaker.wave.2.fill")
+            volumeSlider.doubleValue = 1.0
         }
     }
 
     @objc func volumeChanged(_ sender: NSSlider) {
         let vol = sender.doubleValue
-        videoJS("v.volume = \(vol)", youtubeCmd: "playerCommand('volume', \(vol))")
-        isMuted = vol == 0
-        setButtonSymbol(volumeButton, isMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+        let muted = vol == 0
+        videoJS("v.volume = \(vol); v.muted = \(muted)",
+                youtubeCmd: "playerCommand('volume', \(vol)); playerCommand(\(muted ? "'mute'" : "'unmute'"))")
+        userWantsMute = muted
+        setButtonSymbol(volumeButton, userWantsMute ? "speaker.slash.fill" : "speaker.wave.2.fill")
     }
 
     private func seekTo(percent: Double) {
@@ -1245,7 +1335,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private func startUpdateTimer() {
         updateTimer?.invalidate()
         updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            guard let self = self, self.controlBarView.alphaValue > 0 else { return }
+            guard let self = self else { return }
+            // Always run: polling drives audio-intent reconciliation, not just UI.
+            // Skipping while controls are hidden would leave the page muted when
+            // YouTube re-mutes during ad transitions and the cursor isn't inside.
             self.pollVideoState()
         }
     }
@@ -1259,7 +1352,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let js = """
         (function() {
             var v = document.querySelector('video');
-            if (v) return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused };
+            if (v) return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused, skips: window.__floatVideoAdSkipCount || 0 };
             if (window.getPlayerState) return window.getPlayerState();
             return null;
         })()
@@ -1272,6 +1365,14 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             let muted = dict["muted"] as? Bool ?? false
             let paused = dict["paused"] as? Bool ?? true
 
+            // Diagnostics: log whenever the in-page ad-skip guard has clicked Skip
+            // since the last poll (the guard runs in-page, so surface it natively).
+            let skips = (dict["skips"] as? NSNumber)?.intValue ?? 0
+            if skips > self.lastAdSkipCount {
+                NSLog("[FloatVideo] Auto-skipped ad (total \(skips))")
+                self.lastAdSkipCount = skips
+            }
+
             // Update progress bar
             if dur > 0 {
                 let fraction = CGFloat(ct / dur)
@@ -1279,13 +1380,28 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             }
             // Update time label
             self.timeLabel.stringValue = "\(self.formatTime(ct)) / \(self.formatTime(dur))"
-            // Sync play state
+            // Sync play state (observed)
             self.isPlaying = !paused
             self.setButtonSymbol(self.playPauseButton, paused ? "play.fill" : "pause.fill")
-            // Sync volume
-            self.isMuted = muted
-            self.setButtonSymbol(self.volumeButton, muted ? "speaker.slash.fill" : "speaker.wave.2.fill")
-            if !muted { self.volumeSlider.doubleValue = vol }
+
+            // Mute/volume: UI reflects user INTENT, not the observed state.
+            // If observed drifts from intent (YouTube re-mutes after an ad, audio
+            // session interruption, etc.) re-assert intent on the page. Self-healing.
+            let desiredMuted = self.userWantsMute
+            self.setButtonSymbol(self.volumeButton, desiredMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
+            if desiredMuted {
+                self.volumeSlider.doubleValue = 0
+                if !muted {
+                    self.videoJS("v.muted = true", youtubeCmd: "playerCommand('mute')")
+                }
+            } else {
+                // Keep the slider visually pinned away from 0 while the user wants audio
+                self.volumeSlider.doubleValue = max(vol, 0.01)
+                if muted || vol == 0 {
+                    self.videoJS("v.muted = false; v.volume = 1.0",
+                                 youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)")
+                }
+            }
         }
     }
 
