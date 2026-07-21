@@ -108,7 +108,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         floatWindow?.loadVideo(
             url: url, videoSrc: videoSrc, embedUrl: embedUrl,
             currentTime: currentTime, site: site,
-            httpServerPort: httpServer?.port ?? 0,
+            // Provider, not a snapshot: the HTTP server starts asynchronously and
+            // its port is still 0 when the first open message arrives.
+            httpServerPortProvider: { [weak self] in self?.httpServer?.port ?? 0 },
             cookies: cookies
         )
 

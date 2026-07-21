@@ -64,6 +64,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var hasInjectedJS = false
     private var hasInjectedAdSkip = false
     private var lastAdSkipCount = 0
+    private var lastAdFFCount = 0
+    private var currentPageURL: String = ""
+    // Queried lazily: the local HTTP server starts asynchronously and its port
+    // is still 0 when the open message arrives, so a snapshot taken in
+    // loadVideo would permanently disable the YouTube embed fallback.
+    private var httpServerPortProvider: (() -> UInt16)?
     private var loadingOverlay: NSView?
     private var hasTriedYouTubeEmbedFallback = false
     private var youtubeEmbedFallbackURL: URL?
@@ -438,11 +444,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     func loadVideo(url: String, videoSrc: String?, embedUrl: String?,
                    currentTime: Double, site: String,
-                   httpServerPort: UInt16 = 0,
+                   httpServerPortProvider: (() -> UInt16)? = nil,
                    cookies: [[String: Any]] = []) {
         // Save parameters for NavigationDelegate use
         self.currentSite = site
         self.currentVideoTime = currentTime
+        self.currentPageURL = url
+        self.httpServerPortProvider = httpServerPortProvider
         self.hasInjectedJS = false
         self.loadingStrategy = .fullPageInject
         resetYouTubeFallbackState()
@@ -461,13 +469,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
         // Priority 2: YouTube -- prefer watch page + JS injection, keep embed as fallback
         if site == "youtube" {
-            if let fallbackURL = buildYouTubeEmbedFallbackURL(
-                pageURL: url,
-                currentTime: currentTime,
-                httpServerPort: httpServerPort
-            ) {
-                youtubeEmbedFallbackURL = fallbackURL
-            }
+            refreshYouTubeEmbedFallbackURLIfNeeded()
 
             if !url.isEmpty, let pageURL = URL(string: url) {
                 let loadPage = { [weak self] in
@@ -613,6 +615,18 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         hasTriedYouTubeEmbedFallback = false
     }
 
+    /// Builds the embed fallback URL if it couldn't be built earlier. The HTTP
+    /// server usually isn't ready yet when loadVideo runs (port still 0), so
+    /// callers that need the fallback URL retry here with the live port.
+    private func refreshYouTubeEmbedFallbackURLIfNeeded() {
+        guard currentSite == "youtube", youtubeEmbedFallbackURL == nil else { return }
+        youtubeEmbedFallbackURL = buildYouTubeEmbedFallbackURL(
+            pageURL: currentPageURL,
+            currentTime: currentVideoTime,
+            httpServerPort: httpServerPortProvider?() ?? 0
+        )
+    }
+
     private func shouldUseYouTubeFullPagePrimary() -> Bool {
         currentSite == "youtube"
             && loadingStrategy == .fullPageInject
@@ -682,10 +696,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         if loadingStrategy == .fullPageInject {
             // Full page load + JS inject: delay removing overlay after injection to let DOM operations complete
             guard !hasInjectedJS else { return }
+            refreshYouTubeEmbedFallbackURLIfNeeded()
             injectVideoMaximize(site: currentSite, currentTime: currentVideoTime)
             // Auto-skip YouTube ads. Idempotent in-page guard (installs a single
             // interval); safe to call alongside the injection retries below.
-            if shouldUseYouTubeFullPagePrimary() {
+            // Deliberately NOT gated on shouldUseYouTubeFullPagePrimary(): the
+            // guard has no dependency on the embed fallback URL.
+            if currentSite == "youtube" {
                 injectAdSkip()
             }
             for delay in [1.5, 3.0, 5.0] {
@@ -711,6 +728,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFail navigation: WKNavigation!, withError error: Error) {
         NSLog("[FloatVideo] Page load failed: \(error)")
+        refreshYouTubeEmbedFallbackURLIfNeeded()
         if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFail") {
             return
         }
@@ -719,6 +737,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     func webView(_ webView: WKWebView, didFailProvisionalNavigation navigation: WKNavigation!, withError error: Error) {
         NSLog("[FloatVideo] Provisional page load failed: \(error)")
+        refreshYouTubeEmbedFallbackURLIfNeeded()
         if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFailProvisional") {
             return
         }
@@ -1045,9 +1064,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private func injectAdSkip() {
         let js = """
         (function() {
-            if (window.__floatVideoAdSkipInstalled) return true;
+            if (window.__floatVideoAdSkipInstalled) return 'already';
             window.__floatVideoAdSkipInstalled = true;
             window.__floatVideoAdSkipCount = window.__floatVideoAdSkipCount || 0;
+            window.__floatVideoAdFFCount = window.__floatVideoAdFFCount || 0;
 
             // Covers old + modern YouTube ad-skip markup.
             var SKIP_SELECTORS = [
@@ -1072,23 +1092,112 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 return null;
             }
 
+            // Per-ad-break state machine. Clicking Skip too early (before a real
+            // user ever could, ~5s) makes YouTube's ad server treat the ad as
+            // improperly delivered and RE-SERVE it — observed as the same break
+            // looping 6-7 ads of 1-2s each. Strategy: instance 1 in a break keeps
+            // the instant skip (most ads tolerate it); each detected re-serve
+            // backs the next click off progressively past human timing.
+            var lastAdT = 0;          // ad video currentTime last tick
+            var instanceCount = 0;    // ad instances in the current logical break
+            var clicks = 0;           // clicks for the current instance (max 3)
+            var lastClickAt = 0;
+            var ffDone = false;
+            var coolOffUntil = 0;     // break-level circuit breaker
+            var lastCoolInstance = 0; // instance that last triggered a cool-off
+            var adGoneTicks = 0;      // consecutive ticks with no ad showing
+
+            function resetInstance() {
+                clicks = 0;
+                lastClickAt = 0;
+                ffDone = false;
+            }
+
             window.__floatVideoAdSkipTimer = setInterval(function() {
+                var player = document.querySelector('#movie_player, .html5-video-player');
+                var adShowing = !!(player && (player.classList.contains('ad-showing') ||
+                                              player.classList.contains('ad-interrupting')));
+                if (!adShowing) {
+                    // Between re-serves YouTube drops out of ad state for a few
+                    // hundred ms (observed in logs), so only treat the break as
+                    // over after 3s without an ad. Real content stretches are
+                    // minutes long; a re-serve gap never is.
+                    if (++adGoneTicks >= 6 && instanceCount > 0) {
+                        instanceCount = 0;
+                        lastAdT = 0;
+                        coolOffUntil = 0;
+                        lastCoolInstance = 0;
+                        resetInstance();
+                    }
+                    return;
+                }
+                var gapTicks = adGoneTicks;
+                adGoneTicks = 0;
+
+                var v = player.querySelector('video') || document.querySelector('video');
+                if (!v) return;
+
+                // New ad instance: break just started, ad state came back after
+                // a short gap (re-serve), or the ad video's clock jumped
+                // backwards (pod advance within continuous ad state).
+                if (instanceCount === 0 || gapTicks > 0 || v.currentTime < lastAdT - 1.0) {
+                    instanceCount++;
+                    resetInstance();
+                }
+                lastAdT = v.currentTime;
+
+                var now = Date.now();
+                if (now < coolOffUntil) return;
+                if (instanceCount >= 5 && instanceCount > lastCoolInstance) {
+                    // Pathological re-serve loop: pause once per new instance and
+                    // let the ad play legitimately for a while before retrying,
+                    // instead of locking out (or hammering) for the whole break.
+                    lastCoolInstance = instanceCount;
+                    coolOffUntil = now + 20000;
+                    return;
+                }
+
+                // Instance 1: click immediately. Re-served instances: wait 5.2s,
+                // 9.2s, 13.2s into the ad — walks past longer skip-offsets
+                // (e.g. 15s campaigns) instead of re-triggering the loop.
+                var minAdTime = (instanceCount === 1)
+                    ? 0
+                    : Math.min(5.2 + 4.0 * (instanceCount - 2), 30);
+                if (v.currentTime < minAdTime) return;
+
                 var btn = findSkipButton();
-                if (btn) {
+                if (!btn) return; // unskippable or button not yet inserted
+
+                if (clicks < 3) {
+                    if (now - lastClickAt < 2000) return;
                     btn.click();
-                    window.__floatVideoAdSkipCount++;
+                    lastClickAt = now;
+                    if (++clicks === 1) window.__floatVideoAdSkipCount++;
+                } else if (!ffDone && now - lastClickAt >= 2000) {
+                    // 3 clicks ignored (e.g. trusted-event enforcement). Only for
+                    // SKIPPABLE ads (button present): end the ad stream directly.
+                    // Main content is never touched (adShowing gate).
+                    if (isFinite(v.duration) && v.duration > 0) {
+                        v.currentTime = v.duration;
+                        window.__floatVideoAdFFCount++;
+                        ffDone = true;
+                    }
                 }
             }, 500);
 
-            return true;
+            return 'installed';
         })();
         """
-        webView.evaluateJavaScript(js) { [weak self] _, err in
+        webView.evaluateJavaScript(js) { [weak self] result, err in
             if let err = err {
                 NSLog("[FloatVideo] Ad-skip guard injection error: \(err)")
             } else {
                 self?.hasInjectedAdSkip = true
-                NSLog("[FloatVideo] Ad-skip guard installed")
+                // Only log fresh installs; the poll-driven self-heal re-invokes
+                // this until the flag is visible, which would otherwise spam.
+                if (result as? String) == "installed" {
+                    NSLog("[FloatVideo] Ad-skip guard installed")
+                }
             }
         }
     }
@@ -1352,7 +1461,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let js = """
         (function() {
             var v = document.querySelector('video');
-            if (v) return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused, skips: window.__floatVideoAdSkipCount || 0 };
+            if (v) return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused,
+                            skips: window.__floatVideoAdSkipCount || 0,
+                            ff: window.__floatVideoAdFFCount || 0,
+                            adSkipInstalled: !!window.__floatVideoAdSkipInstalled };
             if (window.getPlayerState) return window.getPlayerState();
             return null;
         })()
@@ -1371,6 +1483,21 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             if skips > self.lastAdSkipCount {
                 NSLog("[FloatVideo] Auto-skipped ad (total \(skips))")
                 self.lastAdSkipCount = skips
+            }
+            let ff = (dict["ff"] as? NSNumber)?.intValue ?? 0
+            if ff > self.lastAdFFCount {
+                NSLog("[FloatVideo] Fast-forwarded stuck ad (total \(ff))")
+                self.lastAdFFCount = ff
+            }
+
+            // Self-healing: a full in-page navigation (autoplay-next, reload)
+            // wipes the JS world while Swift-side state blocks re-injection in
+            // didFinish. Re-install the ad-skip guard whenever the page reports
+            // it missing. Same philosophy as the mute-intent reconciliation below.
+            let adSkipInstalled = dict["adSkipInstalled"] as? Bool ?? true
+            if !adSkipInstalled, self.currentSite == "youtube",
+               self.loadingStrategy == .fullPageInject {
+                self.injectAdSkip()
             }
 
             // Update progress bar
