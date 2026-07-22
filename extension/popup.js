@@ -77,6 +77,11 @@ document.addEventListener('DOMContentLoaded', async () => {
                 button.textContent = '⏳ Connecting...';
 
                 try {
+                    // Capture the tab's player settings (caption track incl.
+                    // auto-translate, playback rate, yt-player-* localStorage)
+                    // so the floating window can reproduce them.
+                    const playerPrefs = await capturePlayerPrefs(tab.id, video.site);
+
                     // Pause the original video
                     await chrome.tabs.sendMessage(tab.id, {
                         type: 'FLOAT_VIDEO',
@@ -87,6 +92,7 @@ document.addEventListener('DOMContentLoaded', async () => {
                     const result = await chrome.runtime.sendMessage({
                         type: 'FLOAT_VIDEO_REQUEST',
                         videoInfo: video,
+                        playerPrefs,
                     });
 
                     if (result?.success) {
@@ -111,6 +117,54 @@ document.addEventListener('DOMContentLoaded', async () => {
         });
     }
 });
+
+// Captures YouTube player settings from the tab so the floating window can
+// mirror them: active caption track (incl. auto-translate target), playback
+// rate, and all yt-player-* localStorage (sticky captions/quality/volume).
+// Runs in the page's MAIN world because the player API lives on the page's
+// #movie_player element, out of reach of the isolated content-script world.
+async function capturePlayerPrefs(tabId, site) {
+    if (site !== 'youtube') return null;
+    try {
+        const [res] = await chrome.scripting.executeScript({
+            target: { tabId },
+            world: 'MAIN',
+            func: () => {
+                const out = { localStorage: {}, captionTrack: null, playbackRate: 1 };
+                try {
+                    for (let i = 0; i < localStorage.length; i++) {
+                        const k = localStorage.key(i);
+                        if (k && k.indexOf('yt-player-') === 0) {
+                            out.localStorage[k] = localStorage.getItem(k);
+                        }
+                    }
+                } catch (e) {}
+                try {
+                    const p = document.getElementById('movie_player');
+                    if (p && typeof p.getOption === 'function') {
+                        const t = p.getOption('captions', 'track');
+                        if (t && t.languageCode) {
+                            out.captionTrack = { languageCode: t.languageCode };
+                            if (t.kind) out.captionTrack.kind = t.kind;
+                            if (t.translationLanguage && t.translationLanguage.languageCode) {
+                                out.captionTrack.translationLanguage = {
+                                    languageCode: t.translationLanguage.languageCode,
+                                };
+                            }
+                        }
+                    }
+                    if (p && typeof p.getPlaybackRate === 'function') {
+                        out.playbackRate = p.getPlaybackRate();
+                    }
+                } catch (e) {}
+                return out;
+            },
+        });
+        return res?.result || null;
+    } catch (e) {
+        return null; // non-fatal: float without prefs
+    }
+}
 
 function escapeHtml(text) {
     const div = document.createElement('div');

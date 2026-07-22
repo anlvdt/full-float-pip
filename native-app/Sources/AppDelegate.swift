@@ -63,7 +63,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 embedUrl: embedUrl.isEmpty ? nil : embedUrl,
                 title: title, width: width, height: height,
                 currentTime: currentTime, site: site,
-                cookies: cookies
+                cookies: cookies,
+                playerPrefs: msg["playerPrefs"] as? [String: Any]
             )
 
             messageHandler?.sendMessage([
@@ -96,7 +97,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
     func openFloatWindow(url: String, videoSrc: String?, embedUrl: String?,
                          title: String, width: CGFloat, height: CGFloat,
                          currentTime: Double, site: String,
-                         cookies: [[String: Any]] = []) {
+                         cookies: [[String: Any]] = [],
+                         playerPrefs: [String: Any]? = nil) {
         closeFloatWindow()
 
         floatWindow = FloatWindow(
@@ -111,7 +113,8 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             // Provider, not a snapshot: the HTTP server starts asynchronously and
             // its port is still 0 when the first open message arrives.
             httpServerPortProvider: { [weak self] in self?.httpServer?.port ?? 0 },
-            cookies: cookies
+            cookies: cookies,
+            playerPrefs: playerPrefs
         )
 
         floatWindow?.onClose = { [weak self] in

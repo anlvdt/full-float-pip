@@ -40,7 +40,7 @@ class FloatVideoManager {
     }
 
     // Send float video command to Native App
-    async floatVideo(videoInfo) {
+    async floatVideo(videoInfo, playerPrefs) {
         // Prevent duplicate requests from rapid double-clicks
         if (this.floatingInProgress) {
             return { success: false, error: 'Already opening a video' };
@@ -48,13 +48,13 @@ class FloatVideoManager {
         this.floatingInProgress = true;
 
         try {
-            return await this._doFloatVideo(videoInfo);
+            return await this._doFloatVideo(videoInfo, playerPrefs);
         } finally {
             this.floatingInProgress = false;
         }
     }
 
-    async _doFloatVideo(videoInfo) {
+    async _doFloatVideo(videoInfo, playerPrefs) {
         // ⭐ Restart the native process every time to ensure clean WKWebView state
         // macOS 12+ deprecated WKProcessPool, making in-process Web Content Process isolation impossible
         // The only reliable method is to restart the entire native app process
@@ -95,6 +95,12 @@ class FloatVideoManager {
             height: h,
             currentTime: videoInfo.currentTime || 0,
         };
+
+        // Player settings captured from the tab (captions/translate, rate,
+        // sticky yt-player-* localStorage) — mirrored into the float window.
+        if (videoInfo.site === 'youtube' && playerPrefs) {
+            message.playerPrefs = playerPrefs;
+        }
 
         // Get YouTube cookies and attach to the message
         if (videoInfo.site === 'youtube') {
@@ -175,7 +181,7 @@ chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
 
         case 'FLOAT_VIDEO_REQUEST': {
             (async () => {
-                const result = await manager.floatVideo(message.videoInfo);
+                const result = await manager.floatVideo(message.videoInfo, message.playerPrefs || null);
                 sendResponse(result);
             })();
             break;

@@ -65,6 +65,9 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var hasInjectedAdSkip = false
     private var lastAdSkipCount = 0
     private var lastAdFFCount = 0
+    private var isPostingSyntheticClick = false
+    private var playerPrefs: [String: Any]?
+    private var prefsApplyAttemptsLeft = 0
     private var currentPageURL: String = ""
     // Queried lazily: the local HTTP server starts asynchronously and its port
     // is still 0 when the open message arrives, so a snapshot taken in
@@ -445,15 +448,18 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     func loadVideo(url: String, videoSrc: String?, embedUrl: String?,
                    currentTime: Double, site: String,
                    httpServerPortProvider: (() -> UInt16)? = nil,
-                   cookies: [[String: Any]] = []) {
+                   cookies: [[String: Any]] = [],
+                   playerPrefs: [String: Any]? = nil) {
         // Save parameters for NavigationDelegate use
         self.currentSite = site
         self.currentVideoTime = currentTime
         self.currentPageURL = url
         self.httpServerPortProvider = httpServerPortProvider
+        self.playerPrefs = playerPrefs
         self.hasInjectedJS = false
         self.loadingStrategy = .fullPageInject
         resetYouTubeFallbackState()
+        installPlayerPrefsSeedScript()
 
         // Suspend all media playback while overlay is visible, prevent audio during loading
         webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
@@ -633,6 +639,88 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             && youtubeEmbedFallbackURL != nil
     }
 
+    /// Mirrors the Chrome tab's `yt-player-*` localStorage (caption stickiness,
+    /// quality, playback rate, volume) into this fresh WKWebView session BEFORE
+    /// YouTube's code boots, so the floating player starts with the same player
+    /// settings the user had in the browser tab.
+    private func installPlayerPrefsSeedScript() {
+        let controller = webView.configuration.userContentController
+        controller.removeAllUserScripts()
+        guard currentSite == "youtube",
+              let raw = playerPrefs?["localStorage"] as? [String: Any] else { return }
+        let ls = raw.compactMapValues { $0 as? String }
+        guard !ls.isEmpty,
+              let data = try? JSONSerialization.data(withJSONObject: ls) else { return }
+        let b64 = data.base64EncodedString()
+        let source = """
+        try {
+            var d = JSON.parse(atob('\(b64)'));
+            for (var k in d) { try { localStorage.setItem(k, d[k]); } catch (e) {} }
+        } catch (e) {}
+        """
+        controller.addUserScript(WKUserScript(source: source,
+                                              injectionTime: .atDocumentStart,
+                                              forMainFrameOnly: true))
+    }
+
+    /// Re-applies the exact per-video player state captured from the Chrome tab
+    /// at float time: the active caption track (including auto-translate target
+    /// language) and the playback rate. Retries until YouTube's player + caption
+    /// module are ready; the localStorage seed above already covers the sticky
+    /// defaults, this covers the current video's explicit selection.
+    private func scheduleApplyPlayerPrefs() {
+        guard currentSite == "youtube", loadingStrategy == .fullPageInject,
+              playerPrefs != nil else { return }
+        prefsApplyAttemptsLeft = 8
+        attemptApplyPlayerPrefs(after: 2.0)
+    }
+
+    private func attemptApplyPlayerPrefs(after delay: TimeInterval) {
+        guard prefsApplyAttemptsLeft > 0 else { return }
+        prefsApplyAttemptsLeft -= 1
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
+            guard let self = self else { return }
+            var trackB64 = ""
+            if let track = self.playerPrefs?["captionTrack"] as? [String: Any],
+               let data = try? JSONSerialization.data(withJSONObject: track) {
+                trackB64 = data.base64EncodedString()
+            }
+            let rate = (self.playerPrefs?["playbackRate"] as? NSNumber)?.doubleValue ?? 1.0
+            let js = """
+            (function() {
+                if (window.__floatVideoPrefsApplied) return 'done';
+                var p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
+                if (!p) return 'retry';
+                var rate = \(rate);
+                if (rate > 0 && rate !== 1 && typeof p.setPlaybackRate === 'function') {
+                    try { p.setPlaybackRate(rate); } catch (e) {}
+                }
+                var trackB64 = '\(trackB64)';
+                if (!trackB64) { window.__floatVideoPrefsApplied = true; return 'applied'; }
+                if (typeof p.setOption !== 'function' || typeof p.getOption !== 'function') return 'retry';
+                var list = null;
+                try { list = p.getOption('captions', 'tracklist'); } catch (e) { return 'retry'; }
+                if (!list || !list.length) return 'retry';
+                try {
+                    var track = JSON.parse(atob(trackB64));
+                    p.setOption('captions', 'track', track);
+                    window.__floatVideoPrefsApplied = true;
+                    return 'applied';
+                } catch (e) { return 'retry'; }
+            })();
+            """
+            self.webView.evaluateJavaScript(js) { [weak self] result, _ in
+                guard let self = self else { return }
+                let status = result as? String ?? "retry"
+                if status == "applied" {
+                    NSLog("[FloatVideo] Player prefs applied (captions/rate)")
+                } else if status == "retry" {
+                    self.attemptApplyPlayerPrefs(after: 1.5)
+                }
+            }
+        }
+    }
+
     private func scheduleInjectedLayoutRefresh(after delay: TimeInterval = 0.05) {
         guard hasInjectedJS, loadingStrategy == .fullPageInject else { return }
         reinjectLayoutWorkItem?.cancel()
@@ -704,6 +792,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             // guard has no dependency on the embed fallback URL.
             if currentSite == "youtube" {
                 injectAdSkip()
+                scheduleApplyPlayerPrefs()
             }
             for delay in [1.5, 3.0, 5.0] {
                 DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
@@ -1074,6 +1163,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 '.ytp-ad-skip-button-modern',
                 '.ytp-ad-skip-button',
                 '.ytp-skip-ad-button',
+                '.ytp-skip-ad button',
                 '.ytp-ad-skip-button-slot button',
                 '.ytp-ad-skip-button-container button'
             ];
@@ -1090,6 +1180,61 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                     return el;
                 }
                 return null;
+            }
+
+            // --- Trusted-click support -----------------------------------
+            // YouTube now ignores untrusted (JS-synthesized) clicks on the
+            // skip button, so the actual press is performed by the native app
+            // as a real mouse event. To make that possible the button must be
+            // renderable and hit-testable: reveal its ancestor chain (siblings
+            // stay hidden — they carry their own inline display:none), keep
+            // the button itself at 2% opacity so nothing is visible over the
+            // video, then publish its center point for the Swift side, which
+            // consumes it via the state poll and posts real mouse events.
+            var revealed = [];
+
+            function prepareForTrustedClick(btn) {
+                try {
+                    var node = btn;
+                    while (node && node !== document.body) {
+                        // The chain shared with the <video> is already visible
+                        // and must keep receiving pointer events — skip it.
+                        if (node.classList && node.classList.contains('__floatvideo-ancestor')) {
+                            node = node.parentElement;
+                            continue;
+                        }
+                        node.style.setProperty('display', 'block', 'important');
+                        node.style.setProperty('visibility', 'visible', 'important');
+                        if (node === btn) {
+                            node.style.setProperty('opacity', '0.02', 'important');
+                            node.style.setProperty('pointer-events', 'auto', 'important');
+                            node.style.setProperty('position', 'relative', 'important');
+                            node.style.setProperty('z-index', '2147483647', 'important');
+                        } else {
+                            node.style.setProperty('pointer-events', 'none', 'important');
+                        }
+                        if (revealed.indexOf(node) < 0) revealed.push(node);
+                        node = node.parentElement;
+                    }
+                    var r = btn.getBoundingClientRect();
+                    if (!r || r.width < 2 || r.height < 2) return null;
+                    var x = r.left + r.width / 2;
+                    var y = r.top + r.height / 2;
+                    if (x < 1 || y < 1 || x > window.innerWidth - 1 || y > window.innerHeight - 1) return null;
+                    return { x: x, y: y };
+                } catch (e) { return null; }
+            }
+
+            function restoreRevealed() {
+                while (revealed.length) {
+                    var n = revealed.pop();
+                    try {
+                        n.style.setProperty('display', 'none', 'important');
+                        n.style.removeProperty('pointer-events');
+                        n.style.removeProperty('z-index');
+                    } catch (e) {}
+                }
+                window.__floatVideoPendingTrustedClick = null;
             }
 
             // Per-ad-break state machine. Clicking Skip too early (before a real
@@ -1118,6 +1263,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 var adShowing = !!(player && (player.classList.contains('ad-showing') ||
                                               player.classList.contains('ad-interrupting')));
                 if (!adShowing) {
+                    restoreRevealed();
                     // Between re-serves YouTube drops out of ad state for a few
                     // hundred ms (observed in logs), so only treat the break as
                     // over after 3s without an ad. Real content stretches are
@@ -1141,6 +1287,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 // a short gap (re-serve), or the ad video's clock jumped
                 // backwards (pod advance within continuous ad state).
                 if (instanceCount === 0 || gapTicks > 0 || v.currentTime < lastAdT - 1.0) {
+                    restoreRevealed();
                     instanceCount++;
                     resetInstance();
                 }
@@ -1170,15 +1317,30 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
                 if (clicks < 3) {
                     if (now - lastClickAt < 2000) return;
-                    btn.click();
+                    // Free first shot: some player builds expose an internal
+                    // skipAd(); harmless no-op elsewhere.
+                    try { if (typeof player.skipAd === 'function') player.skipAd(); } catch (e) {}
+                    var pt = prepareForTrustedClick(btn);
+                    if (pt) {
+                        // Native side consumes this via the state poll and posts
+                        // a real (trusted) mouse click at these page coordinates.
+                        window.__floatVideoPendingTrustedClick = { x: pt.x, y: pt.y, ts: now };
+                    } else {
+                        // Could not obtain a hit-testable rect — fall back to the
+                        // untrusted click (better than nothing).
+                        btn.click();
+                    }
                     lastClickAt = now;
                     if (++clicks === 1) window.__floatVideoAdSkipCount++;
                 } else if (!ffDone && now - lastClickAt >= 2000) {
-                    // 3 clicks ignored (e.g. trusted-event enforcement). Only for
-                    // SKIPPABLE ads (button present): end the ad stream directly.
+                    // 3 clicks ignored. Only for SKIPPABLE ads (button present):
+                    // jump to just before the end and let 'ended' fire naturally,
+                    // which the ad pipeline credits as a completion far more
+                    // reliably than a hard seek to duration (fewer re-serves).
                     // Main content is never touched (adShowing gate).
-                    if (isFinite(v.duration) && v.duration > 0) {
-                        v.currentTime = v.duration;
+                    if (isFinite(v.duration) && v.duration > 0.5) {
+                        restoreRevealed();
+                        v.currentTime = Math.max(0, v.duration - 0.15);
                         window.__floatVideoAdFFCount++;
                         ffDone = true;
                     }
@@ -1200,6 +1362,45 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 }
             }
         }
+    }
+
+    /// Posts a real mouse down/up pair at the given page coordinates (CSS px,
+    /// top-left origin) inside the WKWebView. Real AppKit events produce
+    /// TRUSTED DOM events in WebKit — required because YouTube now ignores
+    /// untrusted (JS-synthesized) clicks on the ad Skip button.
+    private func performTrustedClick(pageX: Double, pageY: Double) {
+        let bounds = webView.bounds
+        guard pageX >= 1, pageY >= 1,
+              pageX <= Double(bounds.width) - 1,
+              pageY <= Double(bounds.height) - 1 else { return }
+
+        // Page Y grows downward; AppKit view coordinates grow upward.
+        let viewPoint = NSPoint(x: pageX, y: bounds.height - CGFloat(pageY))
+
+        // Never click through our own overlay UI; the guard retries in <=2s,
+        // by which time the hover bars are usually hidden again.
+        if let container = webView.superview {
+            let containerPoint = webView.convert(viewPoint, to: container)
+            if titleBarView.alphaValue > 0.01, titleBarView.frame.contains(containerPoint) { return }
+            if controlBarView.alphaValue > 0.01, controlBarView.frame.contains(containerPoint) { return }
+        }
+
+        let windowPoint = webView.convert(viewPoint, to: nil)
+        let time = ProcessInfo.processInfo.systemUptime
+        guard let down = NSEvent.mouseEvent(with: .leftMouseDown, location: windowPoint,
+                                            modifierFlags: [], timestamp: time,
+                                            windowNumber: windowNumber, context: nil,
+                                            eventNumber: 0, clickCount: 1, pressure: 1),
+              let up = NSEvent.mouseEvent(with: .leftMouseUp, location: windowPoint,
+                                          modifierFlags: [], timestamp: time + 0.05,
+                                          windowNumber: windowNumber, context: nil,
+                                          eventNumber: 0, clickCount: 1, pressure: 1) else { return }
+
+        isPostingSyntheticClick = true
+        sendEvent(down)
+        sendEvent(up)
+        isPostingSyntheticClick = false
+        NSLog("[FloatVideo] Trusted click at page (\(Int(pageX)), \(Int(pageY)))")
     }
 
     // MARK: - Window Actions
@@ -1461,10 +1662,21 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let js = """
         (function() {
             var v = document.querySelector('video');
-            if (v) return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused,
-                            skips: window.__floatVideoAdSkipCount || 0,
-                            ff: window.__floatVideoAdFFCount || 0,
-                            adSkipInstalled: !!window.__floatVideoAdSkipInstalled };
+            if (v) {
+                // Consume any pending trusted-click request atomically with the
+                // current ad state so the native side never fires a stale click
+                // after the ad has already ended.
+                var tc = window.__floatVideoPendingTrustedClick || null;
+                window.__floatVideoPendingTrustedClick = null;
+                var mp = document.querySelector('#movie_player, .html5-video-player');
+                var ads = !!(mp && (mp.classList.contains('ad-showing') ||
+                                    mp.classList.contains('ad-interrupting')));
+                return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused,
+                         skips: window.__floatVideoAdSkipCount || 0,
+                         ff: window.__floatVideoAdFFCount || 0,
+                         adSkipInstalled: !!window.__floatVideoAdSkipInstalled,
+                         tc: tc, ads: ads };
+            }
             if (window.getPlayerState) return window.getPlayerState();
             return null;
         })()
@@ -1498,6 +1710,17 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             if !adSkipInstalled, self.currentSite == "youtube",
                self.loadingStrategy == .fullPageInject {
                 self.injectAdSkip()
+            }
+
+            // Trusted click: the in-page guard published the skip button's
+            // center; press it with a real mouse event. Only honor requests
+            // whose same-poll snapshot still shows an ad, so a click can never
+            // land on content after the ad ended between guard tick and poll.
+            if let tc = dict["tc"] as? [String: Any],
+               (dict["ads"] as? Bool) == true,
+               let px = (tc["x"] as? NSNumber)?.doubleValue,
+               let py = (tc["y"] as? NSNumber)?.doubleValue {
+                self.performTrustedClick(pageX: px, pageY: py)
             }
 
             // Update progress bar
@@ -1588,6 +1811,9 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     override func sendEvent(_ event: NSEvent) {
         switch event.type {
         case .leftMouseDown:
+            // Synthetic trusted clicks (ad skip) must reach the web view even
+            // when they land inside the resize border.
+            if isPostingSyntheticClick { break }
             let location = event.locationInWindow
             let edge = detectResizeEdge(at: location)
             if edge != .none {
