@@ -67,7 +67,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var lastAdFFCount = 0
     private var isPostingSyntheticClick = false
     private var playerPrefs: [String: Any]?
-    private var prefsApplyAttemptsLeft = 0
+    private var prefsApplyDeadline: Date?
+    private var lastPrefsStatus = "never-ran"
     private var currentPageURL: String = ""
     // Queried lazily: the local HTTP server starts asynchronously and its port
     // is still 0 when the open message arrives, so a snapshot taken in
@@ -461,6 +462,24 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         resetYouTubeFallbackState()
         installPlayerPrefsSeedScript()
 
+        if site == "youtube" {
+            // One-line capture summary so caption problems are attributable at
+            // a glance: was the track (incl. translation) captured at all?
+            var trackDesc = "none"
+            if let track = playerPrefs?["captionTrack"] as? [String: Any],
+               let lang = track["languageCode"] as? String {
+                if let tl = track["translationLanguage"] as? [String: Any],
+                   let tlang = tl["languageCode"] as? String {
+                    trackDesc = "\(lang)->\(tlang)"
+                } else {
+                    trackDesc = lang
+                }
+            }
+            let lsCount = (playerPrefs?["localStorage"] as? [String: Any])?.count ?? 0
+            let rate = (playerPrefs?["playbackRate"] as? NSNumber)?.doubleValue ?? 1.0
+            NSLog("[FloatVideo] playerPrefs received: track=\(trackDesc) lsKeys=\(lsCount) rate=\(rate)")
+        }
+
         // Suspend all media playback while overlay is visible, prevent audio during loading
         webView.setAllMediaPlaybackSuspended(true, completionHandler: nil)
 
@@ -671,13 +690,20 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private func scheduleApplyPlayerPrefs() {
         guard currentSite == "youtube", loadingStrategy == .fullPageInject,
               playerPrefs != nil else { return }
-        prefsApplyAttemptsLeft = 8
+        // Deadline, not a retry count: a pre-roll ad (or a re-serve loop) can
+        // occupy the player for tens of seconds, during which the caption
+        // tracklist is the AD's (empty) one. Attempts during ads don't count.
+        prefsApplyDeadline = Date().addingTimeInterval(60)
         attemptApplyPlayerPrefs(after: 2.0)
     }
 
     private func attemptApplyPlayerPrefs(after delay: TimeInterval) {
-        guard prefsApplyAttemptsLeft > 0 else { return }
-        prefsApplyAttemptsLeft -= 1
+        guard let deadline = prefsApplyDeadline else { return }
+        guard Date() < deadline else {
+            NSLog("[FloatVideo] Player prefs give-up after 60s (last status: \(lastPrefsStatus))")
+            prefsApplyDeadline = nil
+            return
+        }
         DispatchQueue.main.asyncAfter(deadline: .now() + delay) { [weak self] in
             guard let self = self else { return }
             var trackB64 = ""
@@ -691,6 +717,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 if (window.__floatVideoPrefsApplied) return 'done';
                 var p = document.getElementById('movie_player') || document.querySelector('.html5-video-player');
                 if (!p) return 'retry';
+                // While an ad plays, the player exposes the ad's (empty)
+                // tracklist — applying now would misfire. Report distinctly so
+                // the native side keeps waiting without burning the deadline.
+                if (p.classList.contains('ad-showing') || p.classList.contains('ad-interrupting')) {
+                    return 'ad';
+                }
                 var rate = \(rate);
                 if (rate > 0 && rate !== 1 && typeof p.setPlaybackRate === 'function') {
                     try { p.setPlaybackRate(rate); } catch (e) {}
@@ -698,12 +730,18 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 var trackB64 = '\(trackB64)';
                 if (!trackB64) { window.__floatVideoPrefsApplied = true; return 'applied'; }
                 if (typeof p.setOption !== 'function' || typeof p.getOption !== 'function') return 'retry';
+                // The captions module may be unloaded when CC starts off.
+                try { if (typeof p.loadModule === 'function') p.loadModule('captions'); } catch (e) {}
                 var list = null;
                 try { list = p.getOption('captions', 'tracklist'); } catch (e) { return 'retry'; }
                 if (!list || !list.length) return 'retry';
                 try {
                     var track = JSON.parse(atob(trackB64));
                     p.setOption('captions', 'track', track);
+                    // Verify it took — setOption silently no-ops while the
+                    // module is mid-initialization.
+                    var cur = p.getOption('captions', 'track');
+                    if (!cur || !cur.languageCode) return 'retry';
                     window.__floatVideoPrefsApplied = true;
                     return 'applied';
                 } catch (e) { return 'retry'; }
@@ -712,10 +750,21 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             self.webView.evaluateJavaScript(js) { [weak self] result, _ in
                 guard let self = self else { return }
                 let status = result as? String ?? "retry"
-                if status == "applied" {
+                self.lastPrefsStatus = status
+                switch status {
+                case "applied":
                     NSLog("[FloatVideo] Player prefs applied (captions/rate)")
-                } else if status == "retry" {
+                    self.prefsApplyDeadline = nil
+                case "ad":
+                    // Ad occupying the player: extend patience past the ad
+                    // without counting against the deadline meaningfully.
+                    self.prefsApplyDeadline = max(self.prefsApplyDeadline ?? Date(),
+                                                  Date().addingTimeInterval(30))
                     self.attemptApplyPlayerPrefs(after: 1.5)
+                case "retry":
+                    self.attemptApplyPlayerPrefs(after: 1.5)
+                default:
+                    self.prefsApplyDeadline = nil // 'done' or unexpected
                 }
             }
         }
@@ -949,6 +998,24 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                         visibility: hidden !important;
                         opacity: 0 !important;
                     }
+                    /* Caption overlay: sibling of the <video>, so it must be
+                       explicitly kept and painted ABOVE the fullscreen video
+                       (same z-index, later in DOM order => on top). Our layout
+                       forces the player to viewport size, so YouTube's own
+                       caption-window positioning stays valid. */
+                    .ytp-caption-window-container {
+                        display: block !important;
+                        visibility: visible !important;
+                        opacity: 1 !important;
+                        position: fixed !important;
+                        left: 0 !important;
+                        top: 0 !important;
+                        width: 100vw !important;
+                        height: 100vh !important;
+                        z-index: 2147483647 !important;
+                        pointer-events: none !important;
+                        background: transparent !important;
+                    }
                 ` : '';
 
                 styleEl.textContent = `
@@ -1020,6 +1087,14 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                         child.style.setProperty('padding', '0', 'important');
                         hideNonAncestors(child, ancestors, mainVideo);
                     } else {
+                        // Caption overlay DOM is a SIBLING of the <video>, not an
+                        // ancestor — never hide it, or captions can't render.
+                        // The youtubeCss block overlays it above the video.
+                        var cls = (typeof child.className === 'string') ? child.className : '';
+                        if (cls.indexOf('ytp-caption-window-container') >= 0 ||
+                            cls.indexOf('caption-window') >= 0) {
+                            return;
+                        }
                         child.style.setProperty('display', 'none', 'important');
                     }
                 });
