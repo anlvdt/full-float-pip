@@ -59,27 +59,27 @@ body {
 }
 
 .popup-ghost-btn {
-  background: rgba(124, 58, 237, 0.2);
-  color: #c4b5fd;
-  border: 1px solid rgba(167, 139, 250, 0.35);
-  padding: 4px 8px;
-  border-radius: 6px;
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-primary);
+  border: 1px solid var(--border);
+  padding: 5px 10px;
+  border-radius: 999px;
   font-size: 11px;
   font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
   white-space: nowrap;
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, transform 0.1s ease-out;
 }
 
 .popup-ghost-btn:hover {
-  background: rgba(124, 58, 237, 0.4);
-  color: #fff;
+  background: rgba(255, 255, 255, 0.14);
 }
 
 .popup-ghost-btn.active {
-  background: #7c3aed;
+  background: rgba(255, 59, 92, 0.18);
   color: #fff;
-  box-shadow: 0 0 10px rgba(124, 58, 237, 0.6);
+  border-color: rgba(255, 59, 92, 0.5);
 }
 
 .logo-icon {
@@ -1099,11 +1099,37 @@ select:focus-visible {
   outline-offset: 0;
 }
 
+button:active,
+.chip-btn:active,
+.tab-btn:active,
+.popup-ghost-btn:active {
+  transform: scale(0.97);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
+  }
+  button:active,
+  .chip-btn:active,
+  .tab-btn:active,
+  .popup-ghost-btn:active {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  body,
+  .popup-tabs,
+  .chip-btn,
+  .popup-ghost-btn {
+    backdrop-filter: none;
+  }
+  .popup-ghost-btn,
+  .popup-ghost-btn.active {
+    background: #2a2a32;
   }
 }
 

@@ -247,15 +247,16 @@ body {
 }
 
 .ghost-nav-btn {
-  background: rgba(124, 58, 237, 0.15);
-  color: #c4b5fd;
-  border: 1px solid rgba(167, 139, 250, 0.35);
+  background: rgba(255, 255, 255, 0.08);
+  color: var(--text-main);
+  border: 1px solid var(--border);
   padding: 6px 14px;
-  border-radius: 8px;
+  border-radius: 999px;
   font-size: 12px;
   font-weight: 600;
+  letter-spacing: 0.01em;
   cursor: pointer;
-  transition: all 0.2s ease;
+  transition: background 0.15s ease, transform 0.1s ease-out;
   display: flex;
   align-items: center;
   gap: 6px;
@@ -263,16 +264,14 @@ body {
 }
 
 .ghost-nav-btn:hover {
-  background: rgba(124, 58, 237, 0.3);
-  border-color: #a78bfa;
+  background: rgba(255, 255, 255, 0.14);
   color: #fff;
 }
 
 .ghost-nav-btn.active {
-  background: #7c3aed;
+  background: rgba(255, 59, 92, 0.18);
   color: #fff;
-  border-color: #a78bfa;
-  box-shadow: 0 0 14px rgba(124, 58, 237, 0.6);
+  border-color: rgba(255, 59, 92, 0.5);
 }
 
 .source-selector {
@@ -1581,12 +1580,34 @@ select:focus-visible {
   outline-offset: 1px;
 }
 
+button:active,
+.cat-btn:active,
+.view-btn:active,
+.ghost-nav-btn:active {
+  transform: scale(0.97);
+}
+
 @media (prefers-reduced-motion: reduce) {
   *, *::before, *::after {
     animation-duration: 0.01ms !important;
     animation-iteration-count: 1 !important;
     transition-duration: 0.01ms !important;
     scroll-behavior: auto !important;
+  }
+  button:active,
+  .cat-btn:active,
+  .view-btn:active,
+  .ghost-nav-btn:active {
+    transform: none;
+  }
+}
+
+@media (prefers-reduced-transparency: reduce) {
+  .navbar,
+  .toast {
+    background: #121218;
+    backdrop-filter: none;
+    -webkit-backdrop-filter: none;
   }
 }
 
