@@ -119,7 +119,7 @@ class FloatVideoManager {
             url: videoInfo.pageUrl || '',
             videoSrc: videoInfo.src || '',
             embedUrl: videoInfo.embedUrl || '',
-            title: videoInfo.title || 'Float Video',
+            title: videoInfo.title || 'VibeFloat',
             site: videoInfo.site || 'generic',
             width: w,
             height: h,
@@ -132,6 +132,9 @@ class FloatVideoManager {
         }
         if (videoInfo.preferEmbed) {
             message.preferEmbed = true;
+        }
+        if (videoInfo.focusSession) {
+            message.focusSession = true;
         }
 
         // Player settings captured from the tab (captions/translate, rate,

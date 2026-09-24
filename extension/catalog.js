@@ -19,7 +19,7 @@ let favSlugSet = new Set();
 let suggestActiveIdx = -1;
 let suggestItemsCache = [];
 
-const FALLBACK_POSTER = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='360' viewBox='0 0 240 360'><rect width='240' height='360' fill='%2316161f'/><circle cx='120' cy='160' r='32' fill='%23222230'/><polygon points='114,146 134,160 114,174' fill='%23ffffff'/><text x='50%25' y='216' dominant-baseline='middle' text-anchor='middle' fill='%23888899' font-family='sans-serif' font-weight='600' font-size='13'>VibeWatch Cinema</text></svg>";
+const FALLBACK_POSTER = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='360' viewBox='0 0 240 360'><rect width='240' height='360' fill='%2316161f'/><circle cx='120' cy='160' r='32' fill='%23222230'/><polygon points='114,146 134,160 114,174' fill='%23ffffff'/><text x='50%25' y='216' dominant-baseline='middle' text-anchor='middle' fill='%23888899' font-family='sans-serif' font-weight='600' font-size='13'>VibeFloat</text></svg>";
 
 const PLAY_ICON_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>`;
 const LIST_ICON_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`;
@@ -985,15 +985,14 @@ async function loadContinueWatching() {
             ? `<div class="continue-progress"><div class="continue-progress-bar" style="width:${pct}%"></div></div>`
             : '';
         return `
-        <div class="continue-card" data-idx="${idx}">
+        <button type="button" class="continue-card" data-idx="${idx}" title="Phát nổi tiếp — ${escapeAttr(item.name)}">
             <img class="continue-thumb" ${MovieImages.attr(item, 'poster')} width="44" height="60" alt="">
-            <div class="continue-info">
-                <div class="continue-title" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</div>
-                <div class="continue-ep">${escapeHtml(item.epName || 'Tập 1')}</div>
-                <div class="continue-play">Bấm để phát nổi tiếp</div>
+            <span class="continue-info">
+                <span class="continue-title" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span>
+                <span class="continue-ep">${escapeHtml(item.epName || 'Tập 1')}</span>
                 ${progressHtml}
-            </div>
-        </div>
+            </span>
+        </button>
     `;
     }).join('');
 

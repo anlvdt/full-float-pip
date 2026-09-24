@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<!DOCTYPE plist PUBLIC "-//Apple//DTD PLIST 1.0//EN" "http://www.apple.com/DTDs/PropertyList-1.0.dtd">
+<plist version="1.0">
+<dict>
+  <key>CFBundleIdentifier</key>
+  <string>com.aspect.floatvideo</string>
+  <key>CFBundleName</key>
+  <string>VibeFloat</string>
+  <key>CFBundleExecutable</key>
+  <string>FloatVideo</string>
+  <key>CFBundlePackageType</key>
+  <string>APPL</string>
+  <key>CFBundleVersion</key>
+  <string>1.1.0</string>
+  <key>CFBundleShortVersionString</key>
+  <string>1.1.0</string>
+  <key>NSSpeechRecognitionUsageDescription</key>
+  <string>VibeFloat nghe tiếng trong video để tua qua đoạn quảng cáo.</string>
+  <key>NSMicrophoneUsageDescription</key>
+  <string>VibeFloat không thu micro. Hệ thống yêu cầu khóa này để nhận dạng tiếng phát từ video.</string>
+</dict>
+</plist>

@@ -20,7 +20,7 @@ enum VibePlacer {
     static let margin: CGFloat = 14
     static let keepOut: CGFloat = 18
     static let stripGap: CGFloat = 6
-    static let stripHeight: CGFloat = 58
+    static let stripHeight: CGFloat = 72
 
     struct Decision {
         let frame: NSRect

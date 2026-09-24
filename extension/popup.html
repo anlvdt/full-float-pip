@@ -3,7 +3,7 @@
 <head>
   <meta charset="UTF-8">
   <meta name="viewport" content="width=device-width, initial-scale=1.0">
-  <title>FullFloatPiP - VibeWatch Cinema & TikTok VN</title>
+  <title>VibeFloat</title>
   <link rel="stylesheet" href="popup.css">
 </head>
 <body>
@@ -12,13 +12,15 @@
     <header class="header">
       <div class="logo">
         <div class="logo-icon">
-          <svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor">
-            <path d="M18 3v2h-2V3H8v2H6V3H4v18h2v-2h2v2h8v-2h2v2h2V3h-2zM8 17H6v-2h2v2zm0-4H6v-2h2v2zm0-4H6V7h2v2zm10 8h-2v-2h2v2zm0-4h-2v-2h2v2zm0-4h-2V7h2v2z"/>
+          <svg width="18" height="18" viewBox="0 0 24 24" fill="none" aria-hidden="true">
+            <rect x="2.2" y="5" width="14" height="9.2" rx="2" stroke="currentColor" stroke-width="1.7"/>
+            <path d="M5.2 7.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
+            <path d="M7.1 12.2 L10.6 10.2 L7.1 8.2 Z" fill="#ff4d6a"/>
           </svg>
         </div>
         <div class="logo-text">
-          <h1>FullFloatPiP <span class="logo-badge">CINEMA</span></h1>
-          <p class="subtitle">Phát nổi đè lên Cursor, VSCode, Terminal & Spaces</p>
+          <h1>VibeFloat</h1>
+          <p class="subtitle">Nhạc và phim nổi trên Cursor, VS Code, Terminal</p>
         </div>
         <button id="popup-ghost-btn" class="popup-ghost-btn active" title="Xuyên chuột: bấm xuyên qua phim để gõ code bên dưới. Thanh điều khiển vẫn bấm được. ⌘⇧G" type="button" aria-pressed="true">Xuyên chuột: Bật</button>
       </div>
@@ -65,7 +67,7 @@
 
       <!-- Category Filter Chips -->
       <div class="popup-filter-chips">
-        <button class="chip-btn chip-lofi" id="btn-lofi-coding" type="button" title="Phát nổi Lofi Girl 24/7 qua YouTube">Lofi coding</button>
+        <button class="chip-btn chip-lofi" id="btn-lofi-coding" type="button" title="Nhạc không lời, cửa sổ nhỏ, xuyên chuột, hạ tiếng để code tiếp">Nhạc nền</button>
         <button class="chip-btn active" data-cat="moi">Trang chủ</button>
         <button class="chip-btn chip-fav" data-cat="favorites">Danh sách</button>
         <button class="chip-btn chip-cinema" data-cat="chieurap">Chiếu rạp</button>
@@ -79,14 +81,14 @@
 
       <!-- Actions Bar -->
       <div class="movie-panel-actions">
-        <button id="btn-open-catalog" class="catalog-btn" title="Mở VibeWatch Cinema — billboard, rails, tìm kiếm. Trong PiP: Tập sau tự động / Bỏ qua GT.">
+        <button id="btn-open-catalog" class="catalog-btn" title="Mở kho phim. Trong cửa sổ nổi: Tập sau tự động và bỏ qua giới thiệu.">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 3 21 3 21 9"></polyline>
             <polyline points="9 21 3 21 3 15"></polyline>
             <line x1="21" y1="3" x2="14" y2="10"></line>
             <line x1="3" y1="21" x2="10" y2="14"></line>
           </svg>
-          Mở Cinema đầy đủ
+          Mở kho phim
         </button>
         <select id="popup-source-select" class="source-mini-select" title="Chọn nguồn phim">
           <option value="all" selected>Đa nguồn</option>

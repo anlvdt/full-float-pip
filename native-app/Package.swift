@@ -14,6 +14,8 @@ let package = Package(
                 .linkedFramework("Carbon"),
                 .linkedFramework("MediaPlayer"),
                 .linkedFramework("ApplicationServices"),
+                .linkedFramework("Speech"),
+                .linkedFramework("AVFoundation"),
             ]
         )
     ]

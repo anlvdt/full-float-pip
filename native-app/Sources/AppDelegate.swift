@@ -254,7 +254,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
             let url = msg["url"] as? String ?? ""
             let videoSrc = msg["videoSrc"] as? String ?? ""
             let embedUrl = msg["embedUrl"] as? String ?? ""
-            let title = msg["title"] as? String ?? "Float Video"
+            let title = msg["title"] as? String ?? "VibeFloat"
             let site = msg["site"] as? String ?? "generic"
             let width = msg["width"] as? CGFloat
                 ?? CGFloat(msg["width"] as? Int ?? 640)
@@ -262,6 +262,12 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 ?? CGFloat(msg["height"] as? Int ?? 360)
             let currentTime = msg["currentTime"] as? Double ?? 0
             let movieContext = (msg["movieContext"] as? [String: Any]).flatMap { MovieContext(dict: $0) }
+            let preferEmbed = (msg["preferEmbed"] as? Bool) == true
+                || (msg["preferEmbed"] as? NSNumber)?.boolValue == true
+                || (msg["preferEmbed"] as? String)?.lowercased() == "true"
+            let focusSession = (msg["focusSession"] as? Bool) == true
+                || (msg["focusSession"] as? NSNumber)?.boolValue == true
+                || (msg["focusSession"] as? String)?.lowercased() == "true"
 
             // Parse cookies
             var cookies: [[String: Any]] = []
@@ -276,7 +282,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                 currentTime: currentTime, site: site,
                 cookies: cookies,
                 playerPrefs: msg["playerPrefs"] as? [String: Any],
-                movieContext: movieContext
+                movieContext: movieContext,
+                preferEmbed: preferEmbed,
+                focusSession: focusSession
             )
 
             messageHandler?.sendMessage([
@@ -400,7 +408,9 @@ class AppDelegate: NSObject, NSApplicationDelegate {
                          currentTime: Double, site: String,
                          cookies: [[String: Any]] = [],
                          playerPrefs: [String: Any]? = nil,
-                         movieContext: MovieContext? = nil) {
+                         movieContext: MovieContext? = nil,
+                         preferEmbed: Bool = false,
+                         focusSession: Bool = false) {
         closeFloatWindow()
 
         floatWindow = FloatWindow(
@@ -410,6 +420,7 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         )
 
         floatWindow?.applyMovieContext(movieContext)
+        floatWindow?.setPreferYouTubeEmbed(preferEmbed)
 
         floatWindow?.loadVideo(
             url: url, videoSrc: videoSrc, embedUrl: embedUrl,
@@ -434,6 +445,13 @@ class AppDelegate: NSObject, NSApplicationDelegate {
         }
 
         floatWindow?.show()
+        if focusSession {
+            // Instrumental background: stay click-through and quiet so lyrics
+            // and the window itself don't compete with the editor.
+            floatWindow?.setGhostMode(true)
+            floatWindow?.duckVolume()
+            floatWindow?.showHUD("Nhạc nền — xuyên chuột, tiếng nhỏ")
+        }
     }
 
     func closeFloatWindow() {

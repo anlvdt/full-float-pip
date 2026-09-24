@@ -31,14 +31,17 @@ echo ""
 echo "[2/4] Installing executable..."
 INSTALL_DIR="$HOME/Library/Application Support/FloatVideo"
 mkdir -p "$INSTALL_DIR"
-cp "$BUILD_OUTPUT" "$INSTALL_DIR/FloatVideo"
-chmod +x "$INSTALL_DIR/FloatVideo"
-# Ad-hoc sign after copy — unsigned/invalid pages get SIGKILL and Chrome still
-# reports "playing" because postMessage already returned success.
-xattr -cr "$INSTALL_DIR/FloatVideo" 2>/dev/null || true
-codesign --force --sign - --identifier "com.aspect.floatvideo" --timestamp=none "$INSTALL_DIR/FloatVideo" 2>/dev/null \
-  || codesign --force --sign - "$INSTALL_DIR/FloatVideo"
-echo "Installed and signed: $INSTALL_DIR/FloatVideo"
+APP_MACOS="$INSTALL_DIR/VibeFloat.app/Contents/MacOS"
+mkdir -p "$APP_MACOS"
+cp "$BUILD_OUTPUT" "$APP_MACOS/FloatVideo"
+cp "$PROJECT_DIR/native-app/Support/Info.plist" "$INSTALL_DIR/VibeFloat.app/Contents/Info.plist"
+chmod +x "$APP_MACOS/FloatVideo"
+# Launch path must be inside the .app so speech-recognition permission can attach.
+ln -sfn "VibeFloat.app/Contents/MacOS/FloatVideo" "$INSTALL_DIR/FloatVideo"
+xattr -cr "$INSTALL_DIR/VibeFloat.app" 2>/dev/null || true
+codesign --force --sign - --identifier "com.aspect.floatvideo" --timestamp=none "$INSTALL_DIR/VibeFloat.app" 2>/dev/null \
+  || codesign --force --sign - "$APP_MACOS/FloatVideo"
+echo "Installed and signed: $APP_MACOS/FloatVideo"
 
 # ---- Step 3: Create Native Messaging Host wrapper script ----
 echo ""
@@ -50,7 +53,7 @@ LOG_DIR="\$HOME/Library/Logs/FloatVideo"
 LOG_FILE="\$LOG_DIR/native-host.log"
 mkdir -p "\$LOG_DIR"
 printf '\n[%s] starting native host pid=%s\n' "\$(date '+%Y-%m-%d %H:%M:%S')" "\$\$" >> "\$LOG_FILE"
-exec "$INSTALL_DIR/FloatVideo" --native-messaging 2>>"\$LOG_FILE"
+exec "$INSTALL_DIR/VibeFloat.app/Contents/MacOS/FloatVideo" --native-messaging 2>>"\$LOG_FILE"
 HOSTEOF
 chmod +x "$INSTALL_DIR/float_video_host.sh"
 

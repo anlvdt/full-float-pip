@@ -214,13 +214,13 @@ const MovieService = {
                 name: 'Lofi Girl — Beats to relax/study to 24/7',
                 origin_name: 'Nhạc Chill Lofi Coding Không Lời 24/7',
                 year: 'Live',
-                thumb: 'https://i.ytimg.com/vi/jfKfPfyJRdk/maxresdefault.jpg',
-                poster: 'https://i.ytimg.com/vi/jfKfPfyJRdk/maxresdefault.jpg',
+                thumb: 'https://i.ytimg.com/vi/rFZHOHl-L8A/maxresdefault.jpg',
+                poster: 'https://i.ytimg.com/vi/rFZHOHl-L8A/maxresdefault.jpg',
                 quality: 'Live Stream',
                 lang: 'Lofi Music',
                 source: 'livetv',
-                youtubeId: 'jfKfPfyJRdk',
-                streamUrl: 'https://www.youtube.com/watch?v=jfKfPfyJRdk'
+                youtubeId: 'rFZHOHl-L8A',
+                streamUrl: 'https://www.youtube.com/watch?v=rFZHOHl-L8A'
             },
             {
                 slug: 'livetv-synthwave',
@@ -290,12 +290,13 @@ const MovieService = {
         return {
             pageUrl,
             embedUrl: id ? `https://www.youtube.com/embed/${id}?autoplay=1&rel=0` : '',
-            title: title || stream?.name || 'Lofi coding',
+            title: title || stream?.name || 'Nhạc nền',
             site: 'youtube',
-            width: 1280,
-            height: 720,
+            width: 520,
+            height: 292,
             currentTime: 0,
-            preferEmbed: true
+            preferEmbed: true,
+            focusSession: true
         };
     },
 

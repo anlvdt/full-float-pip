@@ -1,8 +1,8 @@
 {
   "manifest_version": 3,
-  "name": "FullFloatPiP",
+  "name": "VibeFloat",
   "version": "1.1.0",
-  "description": "Picture-in-Picture that floats over EVERYTHING including fullscreen apps. Perfect for vibe coding.",
+  "description": "Nhạc và phim nổi trên Cursor, VS Code và Terminal khi đang code.",
   "permissions": [
     "activeTab",
     "nativeMessaging",
