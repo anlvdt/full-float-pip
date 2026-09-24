@@ -91,7 +91,7 @@
           <option value="thai-lan">Thái Lan</option>
         </select>
 
-        <button class="cat-btn cat-fav" data-cat="favorites">Yêu thích</button>
+        <button class="cat-btn cat-fav" data-cat="favorites">Danh sách của tôi</button>
       </div>
     </nav>
 
@@ -101,7 +101,7 @@
       <div class="hero-gradient-overlay"></div>
       <div class="hero-content">
         <div class="hero-badges" id="hero-badges">
-          <span class="hero-badge hero-badge-chieurap">CHIẾU RẠP 2026</span>
+          <span class="hero-badge hero-badge-chieurap">CHIẾU RẠP</span>
           <span class="hero-badge hero-badge-rating" id="hero-rating">8.8</span>
           <span class="hero-badge hero-badge-tm" id="hero-audio-badge">Thuyết Minh</span>
         </div>
@@ -109,23 +109,25 @@
         <div id="hero-origin" class="hero-origin">Original Title · 2026</div>
         <p id="hero-desc" class="hero-desc">Mô tả tóm tắt phim chiếu rạp với nội dung hấp dẫn...</p>
         <div class="hero-actions">
-          <button id="hero-float-btn" class="hero-btn hero-btn-primary" type="button">
-            Phát Nổi Ngay
+          <button id="hero-float-btn" class="hero-btn hero-btn-primary" type="button" title="Phát nổi — cửa sổ tự né vùng code. Tập sau tự động / Bỏ qua GT trong PiP.">
+            Phát nổi
           </button>
           <button id="hero-detail-btn" class="hero-btn hero-btn-secondary" type="button">
-            Chọn Tập & Chi Tiết
+            Chi tiết
           </button>
-          <button id="hero-fav-btn" class="hero-btn hero-btn-ghost" title="Lưu vào danh sách yêu thích" type="button">
-            Lưu phim
+          <button id="hero-fav-btn" class="hero-btn hero-btn-ghost" title="Thêm vào danh sách của tôi" type="button" aria-pressed="false">
+            + Danh sách
           </button>
         </div>
+        <div id="hero-dots" class="hero-dots" hidden></div>
+        <p class="hero-playback-hint">Trong cửa sổ nổi: Tập sau tự động · Bỏ qua giới thiệu</p>
       </div>
     </section>
 
     <!-- Continue Watching rail -->
     <section id="continue-section" class="continue-section hidden">
       <div class="continue-header">
-        <h3>Tiếp tục xem gần đây</h3>
+        <h3>Tiếp tục xem</h3>
         <button id="clear-continue-btn" class="text-btn" type="button">Xóa lịch sử</button>
       </div>
       <div id="continue-rail" class="continue-rail">
@@ -213,7 +215,7 @@
             <div class="modal-info">
               <div class="modal-title-row">
                 <h2 id="modal-title">Tên Phim</h2>
-                <button id="modal-fav-btn" class="modal-fav-btn" title="Thêm vào yêu thích" type="button">Lưu</button>
+                <button id="modal-fav-btn" class="modal-fav-btn" title="Thêm vào danh sách của tôi" type="button">+ Danh sách</button>
               </div>
               <div id="modal-origin" class="modal-origin">Original Name</div>
               

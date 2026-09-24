@@ -15,6 +15,7 @@ document.addEventListener('DOMContentLoaded', async () => {
     initLofiCoding();
     await initWebVideoPanel();
     // Ensure Kho Phim list paints on first open (default tab)
+    loadPopupContinueStrip();
     loadPopupMovies();
 });
 
@@ -40,6 +41,7 @@ function initTabs() {
         } else if (name === 'movies') {
             tabMovies?.classList.add('active');
             panelMovies?.classList.add('active');
+            loadPopupContinueStrip();
             loadPopupMovies(currentSearchKeyword);
         } else if (name === 'tiktok') {
             tabTikTok?.classList.add('active');
@@ -305,6 +307,56 @@ function initMoviePanel() {
             loadPopupMovies();
         });
     }
+
+    document.getElementById('popup-goto-recent')?.addEventListener('click', () => {
+        document.getElementById('tab-recent')?.click();
+    });
+}
+
+async function loadPopupContinueStrip() {
+    const strip = document.getElementById('popup-continue-strip');
+    const rail = document.getElementById('popup-continue-rail');
+    if (!strip || !rail) return;
+
+    const items = await MovieService.getContinueWatching();
+    if (!items.length) {
+        strip.classList.add('hidden');
+        rail.innerHTML = '';
+        return;
+    }
+
+    strip.classList.remove('hidden');
+    rail.innerHTML = items.slice(0, 6).map((item, idx) => {
+        const pct = MovieService.progressPercent(item);
+        const progressHtml = pct > 0
+            ? `<div class="popup-cont-progress"><div class="popup-cont-bar" style="width:${pct}%"></div></div>`
+            : '';
+        return `
+            <button type="button" class="popup-cont-card" data-idx="${idx}" title="Phát nổi tiếp — ${escapeAttr(item.name)}">
+                <img class="popup-cont-thumb" loading="lazy" ${MovieImages.attr(item, 'thumb')} width="36" height="50" alt="">
+                <div class="popup-cont-meta">
+                    <div class="popup-cont-title">${escapeHtml(item.name)}</div>
+                    <div class="popup-cont-ep">${escapeHtml(item.epName || 'Tiếp tục')}</div>
+                    ${progressHtml}
+                </div>
+            </button>
+        `;
+    }).join('');
+
+    rail.querySelectorAll('.popup-cont-card').forEach(card => {
+        card.addEventListener('click', async () => {
+            const idx = Number(card.dataset.idx);
+            const item = items[idx];
+            if (!item) return;
+            card.disabled = true;
+            try {
+                const ok = await floatContinueItem(item);
+                if (ok) loadPopupContinueStrip();
+            } finally {
+                card.disabled = false;
+            }
+        });
+    });
 }
 
 async function loadPopupMovies(keyword = '') {
@@ -315,6 +367,8 @@ async function loadPopupMovies(keyword = '') {
         let items = [];
         if (keyword) {
             items = await MovieService.search(keyword, popupMovieSource);
+        } else if (popupCategory === 'favorites') {
+            items = await MovieService.getFavorites();
         } else {
             items = await MovieService.getLatest(popupMovieSource, popupCategory, 1);
         }
@@ -352,8 +406,8 @@ function renderPopupMovies(items) {
                         <div class="popup-movie-sub">${item.year ? item.year + ' · ' : ''}${escapeHtml(item.origin_name || item.time || '')}</div>
                     </div>
                     <div class="popup-movie-actions">
-                        <button class="float-btn quick-float-btn" title="Phát nổi tập 1 / tiếp tục">Phát nổi</button>
-                        <button class="float-btn ep-pick-btn" title="Chọn tập / server">Tập ▾</button>
+                        <button class="float-btn quick-float-btn" title="Phát nổi — Tập sau tự động / Bỏ qua GT trong PiP">Phát nổi</button>
+                        <button class="float-btn ep-pick-btn" title="Chi tiết · chọn tập / server">Chi tiết</button>
                     </div>
                 </div>
                 <div class="popup-episodes-container hidden"></div>
@@ -376,6 +430,7 @@ function renderPopupMovies(items) {
             try {
                 const ok = await quickFloatMovie(slug, itemSource);
                 quickBtn.textContent = ok ? 'Đang phát' : 'Thử lại';
+                if (ok) loadPopupContinueStrip();
                 if (!ok) showFloatErrorHint('Không mở được phim. Chạy scripts/install.sh rồi tải lại extension.');
             } catch (err) {
                 quickBtn.textContent = 'Thử lại';

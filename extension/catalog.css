@@ -966,30 +966,82 @@ body {
   transform: scale(1.06);
 }
 
-/* Hover Play PiP Overlay Icon */
+/* Hover Play PiP Overlay Icon — replaced by card-hover-actions */
 .card-hover-play {
-  position: absolute;
-  top: 50%;
-  left: 50%;
-  transform: translate(-50%, -50%) scale(0.6);
-  width: 46px;
-  height: 46px;
-  border-radius: 50%;
-  background: var(--accent);
-  color: #fff;
-  display: flex;
-  align-items: center;
-  justify-content: center;
-  opacity: 0;
-  transition: all 0.25s cubic-bezier(0.16, 1, 0.3, 1);
-  box-shadow: 0 0 20px var(--accent-glow);
-  pointer-events: none;
-  z-index: 3;
+  display: none;
 }
 
-.movie-card:hover .card-hover-play {
+.card-hover-actions {
+  position: absolute;
+  inset: 0;
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  gap: 8px;
+  padding: 12px;
+  background: linear-gradient(180deg, transparent 40%, rgba(0, 0, 0, 0.78) 100%);
+  opacity: 0;
+  transform: translateY(6px);
+  transition: opacity 0.2s ease, transform 0.2s ease;
+  z-index: 4;
+  pointer-events: none;
+}
+
+.movie-card:hover .card-hover-actions,
+.movie-card:focus-within .card-hover-actions {
   opacity: 1;
-  transform: translate(-50%, -50%) scale(1);
+  transform: translateY(0);
+  pointer-events: auto;
+}
+
+.card-action-btn {
+  border: none;
+  cursor: pointer;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  gap: 6px;
+  border-radius: 8px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+  transition: transform 0.15s ease, opacity 0.15s ease, background 0.15s ease;
+}
+
+.card-action-btn:hover {
+  transform: scale(1.04);
+}
+
+.card-hover-actions .card-quick-float {
+  background: var(--accent);
+  padding: 8px 12px;
+  box-shadow: 0 6px 18px var(--accent-glow);
+}
+
+.card-hover-actions .card-mylist-btn {
+  width: 36px;
+  height: 36px;
+  border-radius: 50%;
+  background: rgba(255, 255, 255, 0.14);
+  backdrop-filter: blur(8px);
+  border: 1px solid rgba(255, 255, 255, 0.22);
+}
+
+.card-hover-actions .card-mylist-btn.is-listed {
+  background: rgba(255, 255, 255, 0.92);
+  color: #111;
+  border-color: transparent;
+}
+
+.card-quick-float-text {
+  border: none;
+  background: var(--accent);
+  color: #fff;
+  font-size: 11px;
+  font-weight: 700;
+  padding: 5px 10px;
+  border-radius: 6px;
+  cursor: pointer;
 }
 
 .card-badges-top {
@@ -1010,6 +1062,11 @@ body {
   text-transform: uppercase;
   backdrop-filter: blur(8px);
 }
+
+.card-badge.badge-rap { background: #ef4444; color: #fff; }
+.card-badge.badge-tm { background: #f59e0b; color: #000; }
+.card-badge.badge-lt { background: #a855f7; color: #fff; }
+.card-badge.badge-vs { background: rgba(6, 182, 212, 0.9); color: #fff; }
 
 .card-badge-rating {
   position: absolute;
@@ -1525,4 +1582,127 @@ select:focus-visible {
 
 ::-webkit-scrollbar-track {
   background: transparent;
+}
+
+/* --- Netflix-parity polish --- */
+.hero-content.hero-fade {
+  opacity: 0.55;
+  transition: opacity 0.28s ease;
+}
+
+.hero-dots {
+  display: flex;
+  gap: 8px;
+  margin-top: 18px;
+}
+
+.hero-dot {
+  width: 8px;
+  height: 8px;
+  border-radius: 50%;
+  border: none;
+  padding: 0;
+  background: rgba(255, 255, 255, 0.28);
+  cursor: pointer;
+  transition: transform 0.15s ease, background 0.15s ease;
+}
+
+.hero-dot.active {
+  background: #fff;
+  transform: scale(1.2);
+}
+
+.hero-dot:hover {
+  background: rgba(255, 255, 255, 0.7);
+}
+
+.hero-playback-hint {
+  margin-top: 12px;
+  font-size: 11px;
+  color: rgba(255, 255, 255, 0.45);
+  letter-spacing: 0.02em;
+}
+
+.hero-btn-ghost.is-listed {
+  background: rgba(255, 255, 255, 0.22);
+}
+
+.modal-fav-btn.is-listed {
+  background: rgba(255, 255, 255, 0.18);
+}
+
+.suggestion-item.is-active,
+.recent-search-item.is-active {
+  background: rgba(255, 255, 255, 0.12);
+}
+
+.suggestion-empty {
+  padding: 12px;
+  text-align: center;
+  color: var(--text-muted);
+  font-size: 12px;
+}
+
+.suggestion-badge.badge-rap { background: #ef4444; color: #fff; }
+.suggestion-badge.badge-tm { background: #f59e0b; color: #000; }
+.suggestion-badge.badge-lt { background: #a855f7; color: #fff; }
+.suggestion-badge.badge-ep { background: rgba(255, 255, 255, 0.12); color: #fff; }
+
+.recent-searches-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  padding: 8px 12px 4px;
+  font-size: 11px;
+  font-weight: 700;
+  color: var(--text-muted);
+  text-transform: uppercase;
+  letter-spacing: 0.04em;
+}
+
+.recent-search-item {
+  display: flex;
+  align-items: center;
+  padding: 10px 12px;
+  border-radius: 8px;
+  cursor: pointer;
+  transition: background 0.15s ease;
+}
+
+.recent-search-item:hover {
+  background: rgba(255, 255, 255, 0.08);
+}
+
+.recent-search-label {
+  font-size: 13px;
+  color: #fff;
+  font-weight: 600;
+}
+
+.movie-card-top10 {
+  min-width: 168px;
+}
+
+.top10-rail .movie-card {
+  margin-left: 18px;
+}
+
+.card-rank {
+  position: absolute;
+  left: -6px;
+  bottom: -8px;
+  z-index: 3;
+  font-size: 72px;
+  font-weight: 900;
+  line-height: 0.85;
+  color: transparent;
+  -webkit-text-stroke: 2px rgba(255, 255, 255, 0.85);
+  text-shadow: 0 8px 24px rgba(0, 0, 0, 0.55);
+  pointer-events: none;
+  font-family: "SF Pro Display", "Helvetica Neue", Arial, sans-serif;
+  letter-spacing: -4px;
+}
+
+.movie-card-top10 .movie-poster-wrap {
+  margin-left: 28px;
 }

@@ -275,6 +275,92 @@ const MovieService = {
     },
 
     /**
+     * Map genre display name → phimapi slug (best-effort).
+     */
+    genreNameToSlug(name) {
+        if (!name) return '';
+        const n = String(name).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '').replace(/\s+/g, '-');
+        const hit = this.GENRES.find(g => {
+            const gn = g.name.toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '');
+            return gn === String(name).toLowerCase().normalize('NFD').replace(/[\u0300-\u036f]/g, '')
+                || g.id === n
+                || n.includes(g.id);
+        });
+        if (hit) return hit.id;
+        // common aliases
+        if (/hanh.?dong|action/i.test(n)) return 'hanh-dong';
+        if (/tinh.?cam|romance/i.test(n)) return 'tinh-cam';
+        if (/kinh.?di|horror/i.test(n)) return 'kinh-di';
+        if (/hai|comedy/i.test(n)) return 'hai-huoc';
+        if (/vien.?tuong|sci/i.test(n)) return 'vien-tuong';
+        if (/phieu.?luu|adventure/i.test(n)) return 'phieu-luu';
+        if (/vo.?thuat|martial/i.test(n)) return 'vo-thuat';
+        if (/hinh.?su|crime/i.test(n)) return 'hinh-su';
+        if (/tam.?ly|drama/i.test(n)) return 'tam-ly';
+        if (/co.?trang/i.test(n)) return 'co-trang';
+        return '';
+    },
+
+    /**
+     * Top thịnh hành — no dedicated ranking API; sort latest + cinema by rating.
+     */
+    buildTopTrending(pools, limit = 10) {
+        const merged = this._deduplicateList([].concat(...pools.filter(Boolean)));
+        const scored = merged.map(it => ({
+            ...it,
+            _score: (Number(it.rating) || 0) * 10 + (it.isChieuRap ? 3 : 0) + (it.hasThuyetMinh || it.hasLongTieng ? 1 : 0)
+        }));
+        scored.sort((a, b) => b._score - a._score || String(b.year).localeCompare(String(a.year)));
+        return scored.slice(0, limit).map((it, i) => {
+            const { _score, ...rest } = it;
+            return { ...rest, rank: i + 1 };
+        });
+    },
+
+    /**
+     * "Vì bạn đã xem" / Gợi ý tương tự from last continue genres, else same-year hot series.
+     */
+    async getBecauseYouWatched(limit = 12) {
+        const continueList = await this.getContinueWatching();
+        const last = continueList[0];
+        if (!last) return { title: 'Gợi ý cho bạn', subtitle: 'Phim đang hot để bắt đầu', items: [], categoryKey: 'bo' };
+
+        let genreSlug = last.genreSlug || '';
+        let genreLabel = last.genreName || '';
+        if (!genreSlug && Array.isArray(last.genres) && last.genres.length) {
+            genreLabel = last.genres[0];
+            genreSlug = this.genreNameToSlug(genreLabel);
+        }
+
+        let items = [];
+        if (genreSlug) {
+            try {
+                items = await this.getByGenre(genreSlug, 1);
+            } catch (e) { /* ignore */ }
+        }
+        if (!items.length) {
+            items = await this._getKKPhimList('bo', 1);
+            genreLabel = '';
+        }
+
+        // Exclude titles already in continue list
+        const seen = new Set(continueList.map(c => c.slug));
+        items = items.filter(it => !seen.has(it.slug)).slice(0, limit);
+
+        const title = genreLabel
+            ? `Vì bạn đã xem · ${genreLabel}`
+            : `Gợi ý tương tự · ${last.name || 'Phim gần đây'}`;
+
+        return {
+            title,
+            subtitle: 'Dựa trên lịch sử xem gần nhất',
+            items,
+            categoryKey: genreSlug || 'bo',
+            genreSlug
+        };
+    },
+
+    /**
      * Get home sections for VibeWatch Cinema dashboard experience
      */
     async getHomeSections(source = 'kkphim') {
@@ -283,71 +369,122 @@ const MovieService = {
             this._getNguonCList('dangchieu', 1),
             this._getKKPhimList('bo', 1),
             this._getKKPhimList('thuyetminh', 1),
+            this._getKKPhimList('longtieng', 1),
             this._getKKPhimList('le', 1),
-            this._getKKPhimList('hoathinh', 1)
+            this._getKKPhimList('hoathinh', 1),
+            this.getFavorites(),
+            this.getBecauseYouWatched(12)
         ]);
 
         const chieuRapRaw = results[0].status === 'fulfilled' ? results[0].value : [];
         const dangChieuRaw = results[1].status === 'fulfilled' ? results[1].value : [];
         const phimBoRaw = results[2].status === 'fulfilled' ? results[2].value : [];
         const thuyetMinhRaw = results[3].status === 'fulfilled' ? results[3].value : [];
-        const phimLeRaw = results[4].status === 'fulfilled' ? results[4].value : [];
-        const animeRaw = results[5].status === 'fulfilled' ? results[5].value : [];
+        const longTiengRaw = results[4].status === 'fulfilled' ? results[4].value : [];
+        const phimLeRaw = results[5].status === 'fulfilled' ? results[5].value : [];
+        const animeRaw = results[6].status === 'fulfilled' ? results[6].value : [];
+        const favorites = results[7].status === 'fulfilled' ? results[7].value : [];
+        const because = results[8].status === 'fulfilled' ? results[8].value : { items: [] };
 
-        // Spotlight: Pick top cinema release with backdrop
-        let spotlight = null;
-        if (chieuRapRaw.length > 0) {
-            const topCinema = chieuRapRaw.find(m => m.thumb && m.poster) || chieuRapRaw[0];
-            try {
-                const detail = await this.getDetail(topCinema.slug, topCinema.source || 'kkphim');
-                spotlight = { ...topCinema, ...detail };
-            } catch (e) {
-                spotlight = topCinema;
-            }
+        // Billboard: 2–3 cinema titles with detail (parallel)
+        const spotlightCandidates = chieuRapRaw
+            .filter(m => m.thumb || m.poster)
+            .slice(0, 3);
+        const spotlightDetails = await Promise.allSettled(
+            spotlightCandidates.map(m => this.getDetail(m.slug, m.source || 'kkphim'))
+        );
+        const spotlights = spotlightCandidates.map((m, i) => {
+            const d = spotlightDetails[i];
+            return d.status === 'fulfilled' ? { ...m, ...d.value } : m;
+        });
+        const spotlight = spotlights[0] || null;
+
+        const topTrending = this.buildTopTrending([chieuRapRaw, phimBoRaw, phimLeRaw, dangChieuRaw], 10);
+        const phimBoCombined = this._mergeAndDeduplicate(dangChieuRaw, phimBoRaw);
+
+        const sections = [];
+
+        if (favorites.length) {
+            sections.push({
+                id: 'mylist',
+                title: 'Danh sách của tôi',
+                subtitle: 'Phim đã lưu để xem sau',
+                items: favorites.slice(0, 12),
+                categoryKey: 'favorites'
+            });
         }
 
-        // Merge Dang Chieu with Phim Bo for freshest daily updates
-        const phimBoCombined = this._mergeAndDeduplicate(dangChieuRaw, phimBoRaw);
+        if (topTrending.length) {
+            sections.push({
+                id: 'top10',
+                title: 'Top 10 thịnh hành',
+                subtitle: 'Xếp theo điểm đánh giá & độ nóng',
+                items: topTrending,
+                categoryKey: 'chieurap',
+                isTop10: true
+            });
+        }
+
+        if (because?.items?.length) {
+            sections.push({
+                id: 'because',
+                title: because.title,
+                subtitle: because.subtitle,
+                items: because.items,
+                categoryKey: because.categoryKey || 'bo',
+                genreSlug: because.genreSlug || ''
+            });
+        }
+
+        sections.push(
+            {
+                id: 'chieurap',
+                title: 'Chiếu rạp',
+                subtitle: 'Bom tấn rạp mới nhất',
+                items: chieuRapRaw.slice(0, 12),
+                categoryKey: 'chieurap'
+            },
+            {
+                id: 'thuyetminh',
+                title: 'Thuyết minh',
+                subtitle: 'Bản tiếng Việt chuẩn phòng thu',
+                items: thuyetMinhRaw.slice(0, 12),
+                categoryKey: 'thuyetminh'
+            },
+            {
+                id: 'phimbo',
+                title: 'Phim bộ hot',
+                subtitle: 'Tập mới cập nhật liên tục',
+                items: phimBoCombined.slice(0, 12),
+                categoryKey: 'bo'
+            },
+            {
+                id: 'longtieng',
+                title: 'Lồng tiếng',
+                subtitle: 'LT chọn lọc cho vibe coding',
+                items: longTiengRaw.slice(0, 12),
+                categoryKey: 'longtieng'
+            },
+            {
+                id: 'anime',
+                title: 'Anime',
+                subtitle: 'Hoạt hình Nhật Bản & 3D hot',
+                items: animeRaw.slice(0, 12),
+                categoryKey: 'hoathinh'
+            },
+            {
+                id: 'phimle',
+                title: 'Phim lẻ',
+                subtitle: 'Điện ảnh thế giới chọn lọc',
+                items: phimLeRaw.slice(0, 12),
+                categoryKey: 'le'
+            }
+        );
 
         return {
             spotlight,
-            sections: [
-                {
-                    id: 'chieurap',
-                    title: 'Phim Chiếu Rạp Mới Nhất 2025 - 2026',
-                    subtitle: 'Bom tấn rạp âm thanh vòm đỉnh cao',
-                    items: chieuRapRaw.slice(0, 12),
-                    categoryKey: 'chieurap'
-                },
-                {
-                    id: 'phimbo',
-                    title: 'Phim Bộ Đang Hot (Cập Nhật Hôm Nay)',
-                    subtitle: 'Các bộ phim đang phát sóng tập mới liên tục',
-                    items: phimBoCombined.slice(0, 12),
-                    categoryKey: 'bo'
-                },
-                {
-                    id: 'thuyetminh',
-                    title: 'Phim Thuyết Minh & Lồng Tiếng Hot',
-                    subtitle: 'Bản tiếng Việt chuẩn phòng thu',
-                    items: thuyetMinhRaw.slice(0, 12),
-                    categoryKey: 'thuyetminh'
-                },
-                {
-                    id: 'phimle',
-                    title: 'Phim Lẻ Đỉnh Cao 2025 - 2026',
-                    subtitle: 'Điện ảnh thế giới chọn lọc mới nhất',
-                    items: phimLeRaw.slice(0, 12),
-                    categoryKey: 'le'
-                },
-                {
-                    id: 'anime',
-                    title: 'Anime & Hoạt Hình Mới Nhất',
-                    subtitle: 'Hoạt hình Nhật Bản và 3D hot nhất',
-                    items: animeRaw.slice(0, 12),
-                    categoryKey: 'hoathinh'
-                }
-            ]
+            spotlights,
+            sections: sections.filter(s => s.items && s.items.length > 0)
         };
     },
 
@@ -699,6 +836,7 @@ const MovieService = {
             rating: (movie.tmdb?.vote_average || movie.imdb?.vote_average) ? Number(movie.tmdb?.vote_average || movie.imdb?.vote_average).toFixed(1) : null,
             episode_current: movie.episode_current || '',
             genres: (movie.category || []).map(c => c.name),
+            genreSlugs: (movie.category || []).map(c => c.slug).filter(Boolean),
             countries: (movie.country || []).map(c => c.name),
             director: (movie.director || []).join(', '),
             casts: (movie.actor || []).join(', '),
@@ -936,6 +1074,13 @@ const MovieService = {
             epSlug: episode.slug,
             linkM3u8: episode.linkM3u8 || '',
             linkEmbed: episode.linkEmbed || '',
+            genres: Array.isArray(movie.genres) ? movie.genres.slice(0, 6) : (prev?.genres || []),
+            genreName: (Array.isArray(movie.genres) && movie.genres[0]) || prev?.genreName || '',
+            genreSlug: (Array.isArray(movie.genreSlugs) && movie.genreSlugs[0])
+                || (Array.isArray(movie.genres) && movie.genres[0]
+                    ? this.genreNameToSlug(movie.genres[0])
+                    : '') || prev?.genreSlug || '',
+            countries: Array.isArray(movie.countries) ? movie.countries.slice(0, 4) : (prev?.countries || []),
             currentTime: opts.currentTime != null
                 ? Number(opts.currentTime) || 0
                 : (sameEp ? (Number(prev.currentTime) || 0) : 0),
@@ -976,6 +1121,10 @@ const MovieService = {
             epSlug: msg.epSlug || prev.epSlug || '',
             linkM3u8: msg.linkM3u8 || prev.linkM3u8 || '',
             linkEmbed: msg.linkEmbed || prev.linkEmbed || '',
+            genres: prev.genres || [],
+            genreName: prev.genreName || '',
+            genreSlug: prev.genreSlug || '',
+            countries: prev.countries || [],
             currentTime: Number(msg.currentTime) || 0,
             duration: Number(msg.duration) || Number(prev.duration) || 0,
             serverIdx: msg.serverIdx != null ? Number(msg.serverIdx) || 0 : (prev.serverIdx ?? 0),
@@ -1160,6 +1309,17 @@ const MovieService = {
         });
     },
 
+    async isFavorite(slug) {
+        if (!slug) return false;
+        const list = await this.getFavorites();
+        return list.some(it => it.slug === slug);
+    },
+
+    async getFavoriteSlugSet() {
+        const list = await this.getFavorites();
+        return new Set(list.map(it => it.slug));
+    },
+
     async toggleFavorite(movie) {
         const list = await this.getFavorites();
         const exists = list.some(it => it.slug === movie.slug);
@@ -1171,14 +1331,22 @@ const MovieService = {
                 {
                     slug: movie.slug,
                     name: movie.name,
+                    origin_name: movie.origin_name || '',
                     poster: movie.poster || movie.thumb || '',
+                    thumb: movie.thumb || movie.poster || '',
                     source: movie.source || 'kkphim',
                     year: movie.year || '',
                     lang: movie.lang || '',
-                    quality: movie.quality || ''
+                    quality: movie.quality || '',
+                    rating: movie.rating || null,
+                    episode_current: movie.episode_current || '',
+                    hasThuyetMinh: !!movie.hasThuyetMinh,
+                    hasLongTieng: !!movie.hasLongTieng,
+                    hasVietsub: movie.hasVietsub !== false,
+                    isChieuRap: !!movie.isChieuRap
                 },
                 ...list
-            ];
+            ].slice(0, 80);
         }
 
         return new Promise(resolve => {
@@ -1187,6 +1355,51 @@ const MovieService = {
             } else {
                 localStorage.setItem('vibe_favorites', JSON.stringify(updated));
                 resolve(!exists);
+            }
+        });
+    },
+
+    async getRecentSearches() {
+        return new Promise(resolve => {
+            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                chrome.storage.local.get(['vibe_recent_searches'], (res) => {
+                    resolve(res.vibe_recent_searches || []);
+                });
+            } else {
+                try {
+                    const stored = localStorage.getItem('vibe_recent_searches');
+                    resolve(stored ? JSON.parse(stored) : []);
+                } catch (e) {
+                    resolve([]);
+                }
+            }
+        });
+    },
+
+    async addRecentSearch(keyword) {
+        const kw = String(keyword || '').trim();
+        if (kw.length < 2) return;
+        const list = await this.getRecentSearches();
+        const filtered = list.filter(s => s.toLowerCase() !== kw.toLowerCase());
+        filtered.unshift(kw);
+        const clamped = filtered.slice(0, 8);
+        return new Promise(resolve => {
+            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                chrome.storage.local.set({ vibe_recent_searches: clamped }, resolve);
+            } else {
+                localStorage.setItem('vibe_recent_searches', JSON.stringify(clamped));
+                resolve();
+            }
+        });
+    },
+
+    async clearRecentSearches() {
+        return new Promise(resolve => {
+            if (typeof chrome !== 'undefined' && chrome.storage?.local) {
+                chrome.storage.local.set({ vibe_recent_searches: [] }, resolve);
+            } else {
+                localStorage.removeItem('vibe_recent_searches');
+                resolve();
             }
         });
     }

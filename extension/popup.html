@@ -44,21 +44,31 @@
 
     <!-- Panel 2: VibeWatch Cinema Movies Hub -->
     <div id="panel-movies" class="tab-panel active">
+      <!-- Continue Watching strip (Netflix loop) -->
+      <div id="popup-continue-strip" class="popup-continue-strip hidden">
+        <div class="popup-continue-header">
+          <span>Tiếp tục xem</span>
+          <button type="button" id="popup-goto-recent" class="text-link-btn">Lịch sử</button>
+        </div>
+        <div id="popup-continue-rail" class="popup-continue-rail"></div>
+      </div>
+
       <!-- Search Bar -->
       <div class="movie-quick-search">
         <svg class="search-ico" width="14" height="14" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.5" stroke-linecap="round" stroke-linejoin="round">
           <circle cx="11" cy="11" r="8"></circle>
           <line x1="21" y1="21" x2="16.65" y2="16.65"></line>
         </svg>
-        <input type="text" id="popup-movie-search" placeholder="Tìm tên phim, diễn viên (Dune, Conan, Doraemon)..." autocomplete="off">
+        <input type="text" id="popup-movie-search" placeholder="Tìm phim, diễn viên..." autocomplete="off">
         <button id="popup-search-clear" class="search-clear-btn hidden" type="button" aria-label="Xóa tìm kiếm" title="Xóa tìm kiếm">&times;</button>
       </div>
 
       <!-- Category Filter Chips -->
       <div class="popup-filter-chips">
         <button class="chip-btn chip-lofi" id="btn-lofi-coding" type="button" title="Phát nổi Lofi Girl 24/7 qua YouTube">Lofi coding</button>
-        <button class="chip-btn active" data-cat="moi">Mới cập nhật</button>
-        <button class="chip-btn chip-cinema" data-cat="chieurap">Chiếu rạp 2026</button>
+        <button class="chip-btn active" data-cat="moi">Trang chủ</button>
+        <button class="chip-btn chip-fav" data-cat="favorites">Danh sách</button>
+        <button class="chip-btn chip-cinema" data-cat="chieurap">Chiếu rạp</button>
         <button class="chip-btn chip-tm" data-cat="thuyetminh">Thuyết minh</button>
         <button class="chip-btn chip-lt" data-cat="longtieng">Lồng tiếng</button>
         <button class="chip-btn" data-cat="bo">Phim bộ</button>
@@ -69,21 +79,22 @@
 
       <!-- Actions Bar -->
       <div class="movie-panel-actions">
-        <button id="btn-open-catalog" class="catalog-btn" title="Mở rạp phim VibeWatch Cinema toàn màn hình">
+        <button id="btn-open-catalog" class="catalog-btn" title="Mở VibeWatch Cinema — billboard, rails, tìm kiếm. Trong PiP: Tập sau tự động / Bỏ qua GT.">
           <svg width="13" height="13" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
             <polyline points="15 3 21 3 21 9"></polyline>
             <polyline points="9 21 3 21 3 15"></polyline>
             <line x1="21" y1="3" x2="14" y2="10"></line>
             <line x1="3" y1="21" x2="10" y2="14"></line>
           </svg>
-          Mở VibeWatch Cinema
+          Mở Cinema đầy đủ
         </button>
         <select id="popup-source-select" class="source-mini-select" title="Chọn nguồn phim">
-          <option value="all" selected>Tổng Hợp Đa Nguồn (Khuyên Dùng)</option>
-          <option value="kkphim">KKPhim (HLS FHD)</option>
-          <option value="nguonc">NguonC (Cập nhật liên tục)</option>
+          <option value="all" selected>Đa nguồn</option>
+          <option value="kkphim">KKPhim</option>
+          <option value="nguonc">NguonC</option>
         </select>
       </div>
+      <p class="popup-playback-hint">Phát nổi · Tập sau tự động · Bỏ qua GT trong PiP</p>
 
       <!-- Movies Grid / List -->
       <div id="popup-movie-list" class="popup-movie-list">

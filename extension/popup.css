@@ -272,6 +272,127 @@ body {
   border-color: #a855f7;
 }
 
+.chip-fav.active {
+  background: rgba(255, 255, 255, 0.16);
+  color: #fff;
+  border-color: rgba(255, 255, 255, 0.45);
+}
+
+/* Continue strip on Kho Phim */
+.popup-continue-strip {
+  margin-bottom: 8px;
+  padding-bottom: 6px;
+  border-bottom: 1px solid rgba(255, 255, 255, 0.06);
+}
+
+.popup-continue-header {
+  display: flex;
+  justify-content: space-between;
+  align-items: center;
+  margin-bottom: 6px;
+  font-size: 11px;
+  font-weight: 700;
+  color: #fff;
+}
+
+.text-link-btn {
+  background: none;
+  border: none;
+  color: var(--text-secondary);
+  font-size: 10.5px;
+  cursor: pointer;
+  padding: 0;
+}
+
+.text-link-btn:hover {
+  color: #fff;
+}
+
+.popup-continue-rail {
+  display: flex;
+  gap: 6px;
+  overflow-x: auto;
+  padding-bottom: 2px;
+}
+
+.popup-continue-rail::-webkit-scrollbar {
+  height: 2px;
+}
+
+.popup-cont-card {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+  min-width: 148px;
+  max-width: 168px;
+  padding: 4px 6px;
+  background: var(--bg-secondary);
+  border: 1px solid var(--border);
+  border-radius: 8px;
+  cursor: pointer;
+  text-align: left;
+  color: inherit;
+  transition: border-color 0.15s ease, transform 0.15s ease, opacity 0.15s ease;
+}
+
+.popup-cont-card:hover {
+  border-color: rgba(255, 59, 92, 0.45);
+  transform: translateY(-1px);
+}
+
+.popup-cont-thumb {
+  width: 28px;
+  height: 40px;
+  border-radius: 3px;
+  object-fit: cover;
+  flex-shrink: 0;
+  background: #1c1c28;
+}
+
+.popup-cont-meta {
+  min-width: 0;
+  flex: 1;
+}
+
+.popup-cont-title {
+  font-size: 10.5px;
+  font-weight: 700;
+  color: #fff;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popup-cont-ep {
+  font-size: 9.5px;
+  color: var(--text-secondary);
+  margin-top: 1px;
+  white-space: nowrap;
+  overflow: hidden;
+  text-overflow: ellipsis;
+}
+
+.popup-cont-progress {
+  margin-top: 4px;
+  height: 2px;
+  background: rgba(255, 255, 255, 0.12);
+  border-radius: 1px;
+  overflow: hidden;
+}
+
+.popup-cont-bar {
+  height: 100%;
+  background: var(--accent, #ff3b5c);
+  border-radius: 1px;
+}
+
+.popup-playback-hint {
+  margin: -2px 0 8px;
+  font-size: 10px;
+  color: var(--text-secondary);
+  opacity: 0.85;
+}
+
 /* Actions Row */
 .movie-panel-actions {
   display: flex;

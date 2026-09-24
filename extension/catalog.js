@@ -1,5 +1,5 @@
 // catalog.js — Controller for VibeWatch Cinema dashboard
-// 100% Zero Emojis, Clean UI/UX, Multi-Section Home Rails, Instant Live Search & Native Float Window
+// Netflix-style browse → decide → watch → continue (VN labels, dark cinema)
 
 let currentSource = 'all';
 let currentCategory = 'moi';
@@ -12,16 +12,43 @@ let currentSearchKeyword = '';
 let currentMovie = null;
 let currentSpotlightMovie = null;
 
+let heroSpotlights = [];
+let heroSpotlightIndex = 0;
+let heroRotateTimer = null;
+let favSlugSet = new Set();
+let suggestActiveIdx = -1;
+let suggestItemsCache = [];
+
 const FALLBACK_POSTER = "data:image/svg+xml;utf8,<svg xmlns='http://www.w3.org/2000/svg' width='240' height='360' viewBox='0 0 240 360'><rect width='240' height='360' fill='%2316161f'/><circle cx='120' cy='160' r='32' fill='%23222230'/><polygon points='114,146 134,160 114,174' fill='%23ffffff'/><text x='50%25' y='216' dominant-baseline='middle' text-anchor='middle' fill='%23888899' font-family='sans-serif' font-weight='600' font-size='13'>VibeWatch Cinema</text></svg>";
 
-const PLAY_ICON_SVG = `<svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>`;
+const PLAY_ICON_SVG = `<svg width="18" height="18" viewBox="0 0 24 24" fill="currentColor"><polygon points="6,4 20,12 6,20"/></svg>`;
+const LIST_ICON_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.4" stroke-linecap="round"><path d="M12 5v14M5 12h14"/></svg>`;
+const LIST_CHECK_SVG = `<svg width="16" height="16" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2.6" stroke-linecap="round" stroke-linejoin="round"><polyline points="20 6 9 17 4 12"/></svg>`;
 
-document.addEventListener('DOMContentLoaded', () => {
+document.addEventListener('DOMContentLoaded', async () => {
     if (typeof MovieImages !== 'undefined') MovieImages.install(document);
+    favSlugSet = await MovieService.getFavoriteSlugSet();
     initUI();
     loadContinueWatching();
     navigateView();
 });
+
+async function refreshFavSet() {
+    favSlugSet = await MovieService.getFavoriteSlugSet();
+}
+
+function setListButtonState(btn, inList) {
+    if (!btn) return;
+    btn.classList.toggle('is-listed', !!inList);
+    btn.setAttribute('aria-pressed', inList ? 'true' : 'false');
+    if (btn.id === 'hero-fav-btn' || btn.id === 'modal-fav-btn') {
+        btn.textContent = inList ? 'Trong danh sách' : '+ Danh sách';
+        btn.title = inList ? 'Bỏ khỏi danh sách của tôi' : 'Thêm vào danh sách của tôi';
+    } else {
+        btn.innerHTML = inList ? LIST_CHECK_SVG : LIST_ICON_SVG;
+        btn.title = inList ? 'Bỏ khỏi danh sách' : 'Thêm vào danh sách';
+    }
+}
 
 // MARK: - Navigation View Router
 function navigateView() {
@@ -31,6 +58,7 @@ function navigateView() {
 
     if (currentSearchKeyword) {
         // Search View
+        stopHeroRotation();
         homeView?.classList.add('hidden');
         gridView?.classList.remove('hidden');
         heroSpotlight?.classList.add('hidden');
@@ -43,6 +71,7 @@ function navigateView() {
         loadHomePage();
     } else {
         // Specific Category / Filter / Favorites View
+        stopHeroRotation();
         homeView?.classList.add('hidden');
         gridView?.classList.remove('hidden');
         heroSpotlight?.classList.add('hidden');
@@ -66,11 +95,12 @@ function initUI() {
     // Search Input with Instant Live Autocomplete Suggestions
     searchInput?.addEventListener('input', (e) => {
         const val = e.target.value.trim();
+        suggestActiveIdx = -1;
         if (val) {
             searchClear?.classList.remove('hidden');
         } else {
             searchClear?.classList.add('hidden');
-            searchDropdown?.classList.add('hidden');
+            showRecentSearchesDropdown();
         }
 
         // Live autocomplete suggest
@@ -80,6 +110,8 @@ function initUI() {
                 const suggestions = await MovieService.quickSuggest(val, currentSource, 6);
                 renderSearchSuggestions(suggestions, val);
             }, 220);
+        } else if (val.length === 0) {
+            showRecentSearchesDropdown();
         } else {
             searchDropdown?.classList.add('hidden');
         }
@@ -95,18 +127,45 @@ function initUI() {
         }, 600);
     });
 
+    searchInput?.addEventListener('focus', () => {
+        const val = searchInput.value.trim();
+        if (!val) showRecentSearchesDropdown();
+    });
+
     searchInput?.addEventListener('keydown', (e) => {
+        const dropdown = searchDropdown;
+        const items = dropdown ? Array.from(dropdown.querySelectorAll('.suggestion-item, .recent-search-item')) : [];
+        const isOpen = dropdown && !dropdown.classList.contains('hidden') && items.length;
+
+        if (e.key === 'ArrowDown' && isOpen) {
+            e.preventDefault();
+            suggestActiveIdx = Math.min(suggestActiveIdx + 1, items.length - 1);
+            updateSuggestActive(items);
+            return;
+        }
+        if (e.key === 'ArrowUp' && isOpen) {
+            e.preventDefault();
+            suggestActiveIdx = Math.max(suggestActiveIdx - 1, 0);
+            updateSuggestActive(items);
+            return;
+        }
         if (e.key === 'Enter') {
             e.preventDefault();
-            searchDropdown?.classList.add('hidden');
+            if (isOpen && suggestActiveIdx >= 0 && items[suggestActiveIdx]) {
+                items[suggestActiveIdx].click();
+                return;
+            }
+            dropdown?.classList.add('hidden');
             const val = searchInput.value.trim();
             if (val) {
+                MovieService.addRecentSearch(val);
                 currentSearchKeyword = val;
                 currentPage = 1;
                 navigateView();
             }
         } else if (e.key === 'Escape') {
-            searchDropdown?.classList.add('hidden');
+            dropdown?.classList.add('hidden');
+            suggestActiveIdx = -1;
         }
     });
 
@@ -114,6 +173,7 @@ function initUI() {
     document.addEventListener('click', (e) => {
         if (!e.target.closest('.search-box')) {
             searchDropdown?.classList.add('hidden');
+            suggestActiveIdx = -1;
         }
     });
 
@@ -123,7 +183,9 @@ function initUI() {
         searchDropdown?.classList.add('hidden');
         currentSearchKeyword = '';
         currentPage = 1;
+        suggestActiveIdx = -1;
         navigateView();
+        searchInput?.focus();
     });
 
     // Source Selector
@@ -358,28 +420,80 @@ function initUI() {
 }
 
 // MARK: - Autocomplete Live Search Suggestions
+function updateSuggestActive(items) {
+    items.forEach((el, i) => el.classList.toggle('is-active', i === suggestActiveIdx));
+    if (suggestActiveIdx >= 0 && items[suggestActiveIdx]) {
+        items[suggestActiveIdx].scrollIntoView({ block: 'nearest' });
+    }
+}
+
+async function showRecentSearchesDropdown() {
+    const dropdown = document.getElementById('search-suggestions');
+    if (!dropdown) return;
+    const recent = await MovieService.getRecentSearches();
+    if (!recent.length) {
+        dropdown.classList.add('hidden');
+        return;
+    }
+    suggestActiveIdx = -1;
+    suggestItemsCache = [];
+    dropdown.innerHTML = `
+        <div class="recent-searches-header">
+            <span>Tìm gần đây</span>
+            <button type="button" class="text-btn" id="clear-recent-searches">Xóa</button>
+        </div>
+        ${recent.map(q => `
+            <div class="recent-search-item" data-query="${escapeAttr(q)}">
+                <span class="recent-search-label">${escapeHtml(q)}</span>
+            </div>
+        `).join('')}
+    `;
+    dropdown.classList.remove('hidden');
+    dropdown.querySelector('#clear-recent-searches')?.addEventListener('click', async (e) => {
+        e.stopPropagation();
+        await MovieService.clearRecentSearches();
+        dropdown.classList.add('hidden');
+    });
+    dropdown.querySelectorAll('.recent-search-item').forEach(el => {
+        el.addEventListener('click', () => {
+            const q = el.dataset.query || '';
+            const input = document.getElementById('search-input');
+            if (input) input.value = q;
+            document.getElementById('search-clear')?.classList.remove('hidden');
+            dropdown.classList.add('hidden');
+            MovieService.addRecentSearch(q);
+            currentSearchKeyword = q;
+            currentPage = 1;
+            navigateView();
+        });
+    });
+}
+
 function renderSearchSuggestions(items, query) {
     const dropdown = document.getElementById('search-suggestions');
     if (!dropdown) return;
+    suggestActiveIdx = -1;
+    suggestItemsCache = items || [];
 
     if (!items || items.length === 0) {
-        dropdown.innerHTML = `<div style="padding: 12px; text-align: center; color: var(--text-muted); font-size: 12px;">Không tìm thấy phim khớp với "${escapeHtml(query)}"</div>`;
+        dropdown.innerHTML = `<div class="suggestion-empty">Không tìm thấy phim khớp với "${escapeHtml(query)}"</div>`;
         dropdown.classList.remove('hidden');
         return;
     }
 
     dropdown.innerHTML = items.map(item => {
         const badges = [];
-        if (item.isChieuRap) badges.push('<span class="suggestion-badge" style="background:#ef4444;color:#fff;">RẠP</span>');
-        if (item.hasThuyetMinh) badges.push('<span class="suggestion-badge" style="background:#f59e0b;color:#000;">TM</span>');
-        if (item.hasLongTieng) badges.push('<span class="suggestion-badge" style="background:#a855f7;color:#fff;">LT</span>');
-        if (item.episode_current) badges.push(`<span class="suggestion-badge" style="background:rgba(255,255,255,0.12);color:#fff;">${escapeHtml(item.episode_current)}</span>`);
+        if (item.isChieuRap) badges.push('<span class="suggestion-badge badge-rap">RẠP</span>');
+        if (item.hasThuyetMinh) badges.push('<span class="suggestion-badge badge-tm">TM</span>');
+        if (item.hasLongTieng) badges.push('<span class="suggestion-badge badge-lt">LT</span>');
+        if (item.episode_current) badges.push(`<span class="suggestion-badge badge-ep">${escapeHtml(item.episode_current)}</span>`);
+        const inList = favSlugSet.has(item.slug);
 
         return `
-            <div class="suggestion-item" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}">
-                <img class="suggestion-thumb" ${MovieImages.attr(item, 'poster')} width="40" height="56" alt="">
+            <div class="suggestion-item" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" role="option">
+                <img class="suggestion-thumb" loading="lazy" ${MovieImages.attr(item, 'poster')} width="40" height="56" alt="">
                 <div class="suggestion-info">
-                    <div class="suggestion-title">${escapeHtml(item.name)}</div>
+                    <div class="suggestion-title">${escapeHtml(item.name)}${inList ? ' · Đã lưu' : ''}</div>
                     <div class="suggestion-sub">${item.year ? item.year + ' · ' : ''}${escapeHtml(item.origin_name || '')}</div>
                     <div class="suggestion-badges">${badges.join('')}</div>
                 </div>
@@ -394,6 +508,8 @@ function renderSearchSuggestions(items, query) {
             dropdown.classList.add('hidden');
             const slug = el.dataset.slug;
             const source = el.dataset.source;
+            const q = document.getElementById('search-input')?.value?.trim();
+            if (q) MovieService.addRecentSearch(q);
             openMovieDetail(slug, source);
         });
     });
@@ -412,17 +528,23 @@ async function loadHomePage() {
     `;
 
     try {
+        await refreshFavSet();
         const homeData = await MovieService.getHomeSections(currentSource);
 
-        // Update Hero Spotlight with top 2026 cinema release
-        if (homeData.spotlight) {
-            renderHeroSpotlight(homeData.spotlight);
+        // Billboard rotation (2–3 spotlights)
+        const spots = (homeData.spotlights && homeData.spotlights.length)
+            ? homeData.spotlights
+            : (homeData.spotlight ? [homeData.spotlight] : []);
+        if (spots.length) {
+            startHeroRotation(spots);
         } else {
+            stopHeroRotation();
             document.getElementById('hero-spotlight')?.classList.add('hidden');
         }
 
         // Render each category rail
         container.innerHTML = homeData.sections.map((sec, secIdx) => {
+            const railClass = sec.isTop10 ? 'home-section-rail top10-rail' : 'home-section-rail';
             return `
                 <section class="home-section" data-sec-id="${sec.id}">
                     <div class="home-section-header">
@@ -430,16 +552,16 @@ async function loadHomePage() {
                             <div class="title-accent-bar"></div>
                             <div>
                                 <h3 class="home-section-title">${escapeHtml(sec.title)}</h3>
-                                <span class="home-section-subtitle">${escapeHtml(sec.subtitle)}</span>
+                                <span class="home-section-subtitle">${escapeHtml(sec.subtitle || '')}</span>
                             </div>
                         </div>
-                        <button class="view-all-btn" data-cat="${sec.categoryKey}">Xem tất cả →</button>
+                        <button class="view-all-btn" data-cat="${escapeAttr(sec.categoryKey)}" data-genre="${escapeAttr(sec.genreSlug || '')}">Xem tất cả →</button>
                     </div>
 
                     <div class="home-section-rail-wrap">
                         <button class="rail-nav-btn rail-prev" data-target="rail-${secIdx}" aria-label="Cuộn trái">‹</button>
-                        <div id="rail-${secIdx}" class="home-section-rail">
-                            ${renderMovieCardsHtml(sec.items)}
+                        <div id="rail-${secIdx}" class="${railClass}">
+                            ${renderMovieCardsHtml(sec.items, { isTop10: !!sec.isTop10 })}
                         </div>
                         <button class="rail-nav-btn rail-next" data-target="rail-${secIdx}" aria-label="Cuộn phải">›</button>
                     </div>
@@ -465,11 +587,24 @@ async function loadHomePage() {
         container.querySelectorAll('.view-all-btn').forEach(btn => {
             btn.addEventListener('click', () => {
                 const targetCat = btn.dataset.cat;
+                const genreSlug = btn.dataset.genre;
+                if (genreSlug) {
+                    const gSelect = document.getElementById('genre-select');
+                    if (gSelect) gSelect.value = genreSlug;
+                    currentGenre = genreSlug;
+                    currentCategory = 'moi';
+                    document.querySelectorAll('.cat-btn').forEach(b => b.classList.remove('active'));
+                    currentPage = 1;
+                    navigateView();
+                    window.scrollTo({ top: 0, behavior: 'smooth' });
+                    return;
+                }
                 if (targetCat) {
                     document.querySelectorAll('.cat-btn').forEach(b => {
                         b.classList.toggle('active', b.dataset.cat === targetCat);
                     });
                     currentCategory = targetCat;
+                    currentGenre = '';
                     currentPage = 1;
                     navigateView();
                     window.scrollTo({ top: 0, behavior: 'smooth' });
@@ -489,7 +624,7 @@ async function loadHomePage() {
 }
 
 // MARK: - Render Movie Cards HTML
-function renderMovieCardsHtml(items) {
+function renderMovieCardsHtml(items, opts = {}) {
     if (!items || items.length === 0) {
         return '<div style="color: var(--text-muted); font-size: 13px; padding: 24px;">Không có phim trong mục này.</div>';
     }
@@ -497,38 +632,51 @@ function renderMovieCardsHtml(items) {
     return items.map(item => {
         const badges = [];
         if (item.isChieuRap) {
-            badges.push('<span class="card-badge" style="background:#ef4444;color:#fff;">RẠP 2026</span>');
+            badges.push('<span class="card-badge badge-rap">RẠP</span>');
         }
         if (item.hasThuyetMinh) {
-            badges.push('<span class="card-badge" style="background:#f59e0b;color:#000;">TM</span>');
+            badges.push('<span class="card-badge badge-tm">TM</span>');
         }
         if (item.hasLongTieng) {
-            badges.push('<span class="card-badge" style="background:#a855f7;color:#fff;">LT</span>');
+            badges.push('<span class="card-badge badge-lt">LT</span>');
         }
         if (item.hasVietsub && !item.hasThuyetMinh && !item.hasLongTieng) {
-            badges.push('<span class="card-badge" style="background:rgba(6,182,212,0.9);color:#fff;">VIETSUB</span>');
+            badges.push('<span class="card-badge badge-vs">VIETSUB</span>');
         }
 
         const ratingBadge = item.rating ? `<span class="card-badge-rating">${item.rating}</span>` : '';
         const epBadge = item.episode_current ? `<span class="card-ep-badge">${escapeHtml(item.episode_current)}</span>` : '';
-
+        const rank = item.rank || opts.rank;
+        const rankHtml = (opts.isTop10 && rank)
+            ? `<span class="card-rank" aria-hidden="true">${rank}</span>`
+            : '';
+        const inList = favSlugSet.has(item.slug);
         const imageKind = currentViewMode === 'view-cinema' ? 'wide' : 'poster';
+        const cardClass = opts.isTop10 ? 'movie-card movie-card-top10' : 'movie-card';
 
         return `
-            <div class="movie-card" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}">
+            <div class="${cardClass}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}">
                 <div class="movie-poster-wrap">
-                    <img class="movie-poster" ${MovieImages.attr(item, imageKind)} alt="${escapeAttr(item.name)}">
+                    ${rankHtml}
+                    <img class="movie-poster" loading="lazy" ${MovieImages.attr(item, imageKind)} alt="${escapeAttr(item.name)}">
                     <div class="card-badges-top">${badges.join('')}</div>
                     ${ratingBadge}
                     ${epBadge}
-                    <div class="card-hover-play">${PLAY_ICON_SVG}</div>
+                    <div class="card-hover-actions">
+                        <button type="button" class="card-action-btn card-quick-float" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="Phát nổi — Tập sau tự động / Bỏ qua GT trong PiP">
+                            ${PLAY_ICON_SVG}<span>Phát nổi</span>
+                        </button>
+                        <button type="button" class="card-action-btn card-mylist-btn ${inList ? 'is-listed' : ''}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="${inList ? 'Bỏ khỏi danh sách' : 'Thêm vào danh sách'}" aria-pressed="${inList ? 'true' : 'false'}">
+                            ${inList ? LIST_CHECK_SVG : LIST_ICON_SVG}
+                        </button>
+                    </div>
                 </div>
                 <div class="movie-info">
                     <div class="movie-title" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</div>
                     <div class="movie-origin">${escapeHtml(item.origin_name || item.year || '')}</div>
                     <div class="movie-footer">
                         <span>${item.year ? 'Năm ' + item.year : (item.quality || 'FHD')}</span>
-                        <button type="button" class="card-quick-float" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}">Phát nổi</button>
+                        <button type="button" class="card-quick-float card-quick-float-text" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="Phát nổi">Phát nổi</button>
                     </div>
                 </div>
             </div>
@@ -542,21 +690,64 @@ function bindCardClicks(container) {
             e.stopPropagation();
             const slug = btn.dataset.slug;
             const source = btn.dataset.source || currentSource;
-            const original = btn.textContent;
-            btn.textContent = '...';
+            const labelEl = btn.querySelector('span');
+            const original = labelEl ? labelEl.textContent : btn.textContent;
+            if (labelEl) labelEl.textContent = '...';
+            else btn.textContent = '...';
             btn.disabled = true;
             try {
                 const ok = await quickFloatMovie(slug, source);
-                btn.textContent = ok ? 'Đang phát' : 'Thử lại';
-                if (ok) showToast('Đã phát nổi — cửa sổ tự né vùng code / nhập liệu');
+                const done = ok ? 'Đang phát' : 'Thử lại';
+                if (labelEl) labelEl.textContent = done;
+                else btn.textContent = done;
+                if (ok) showToast('Đã phát nổi — Tập sau tự động / Bỏ qua GT sẵn trong PiP');
             } catch (err) {
-                btn.textContent = 'Thử lại';
+                if (labelEl) labelEl.textContent = 'Thử lại';
+                else btn.textContent = 'Thử lại';
             } finally {
                 btn.disabled = false;
-                setTimeout(() => { if (btn.textContent !== 'Đang phát') btn.textContent = original; }, 1600);
+                setTimeout(() => {
+                    if (labelEl) {
+                        if (labelEl.textContent !== 'Đang phát') labelEl.textContent = 'Phát nổi';
+                    } else if (btn.textContent !== 'Đang phát') {
+                        btn.textContent = original;
+                    }
+                }, 1600);
             }
         });
     });
+
+    container.querySelectorAll('.card-mylist-btn').forEach(btn => {
+        btn.addEventListener('click', async (e) => {
+            e.stopPropagation();
+            const slug = btn.dataset.slug;
+            const source = btn.dataset.source || currentSource;
+            // Prefer item data from card context via detail lite from favorites or open card attrs
+            const card = btn.closest('.movie-card');
+            const title = card?.querySelector('.movie-title')?.textContent || slug;
+            const poster = card?.querySelector('.movie-poster')?.src || '';
+            const movieStub = {
+                slug,
+                name: title,
+                poster,
+                thumb: poster,
+                source,
+                hasThuyetMinh: !!card?.querySelector('.badge-tm'),
+                hasLongTieng: !!card?.querySelector('.badge-lt'),
+                isChieuRap: !!card?.querySelector('.badge-rap')
+            };
+            const isFav = await MovieService.toggleFavorite(movieStub);
+            await refreshFavSet();
+            setListButtonState(btn, isFav);
+            // Sync other cards with same slug
+            container.querySelectorAll(`.card-mylist-btn[data-slug="${CSS.escape(slug)}"]`).forEach(b => setListButtonState(b, isFav));
+            if (currentSpotlightMovie?.slug === slug) {
+                setListButtonState(document.getElementById('hero-fav-btn'), isFav);
+            }
+            showToast(isFav ? `Đã thêm vào Danh sách của tôi` : `Đã bỏ khỏi Danh sách`);
+        });
+    });
+
     container.querySelectorAll('.movie-card').forEach(card => {
         card.addEventListener('click', () => {
             const slug = card.dataset.slug;
@@ -650,12 +841,82 @@ async function quickFloatMovie(slug, source) {
 }
 
 // MARK: - Cinema Hero Spotlight
-function renderHeroSpotlight(spot) {
+function stopHeroRotation() {
+    if (heroRotateTimer) {
+        clearInterval(heroRotateTimer);
+        heroRotateTimer = null;
+    }
+}
+
+function startHeroRotation(spots) {
+    stopHeroRotation();
+    heroSpotlights = spots.filter(Boolean);
+    heroSpotlightIndex = 0;
+    if (!heroSpotlights.length) return;
+    renderHeroSpotlight(heroSpotlights[0]);
+    renderHeroDots();
+    if (heroSpotlights.length > 1) {
+        heroRotateTimer = setInterval(() => {
+            heroSpotlightIndex = (heroSpotlightIndex + 1) % heroSpotlights.length;
+            renderHeroSpotlight(heroSpotlights[heroSpotlightIndex], { soft: true });
+            updateHeroDots();
+        }, 7500);
+    }
+}
+
+function renderHeroDots() {
+    const dots = document.getElementById('hero-dots');
+    if (!dots) return;
+    if (heroSpotlights.length < 2) {
+        dots.hidden = true;
+        dots.innerHTML = '';
+        return;
+    }
+    dots.hidden = false;
+    dots.innerHTML = heroSpotlights.map((_, i) =>
+        `<button type="button" class="hero-dot ${i === heroSpotlightIndex ? 'active' : ''}" data-idx="${i}" aria-label="Spotlight ${i + 1}"></button>`
+    ).join('');
+    dots.querySelectorAll('.hero-dot').forEach(btn => {
+        btn.addEventListener('click', () => {
+            const idx = Number(btn.dataset.idx) || 0;
+            heroSpotlightIndex = idx;
+            renderHeroSpotlight(heroSpotlights[idx], { soft: true });
+            updateHeroDots();
+            // restart timer
+            stopHeroRotation();
+            if (heroSpotlights.length > 1) {
+                heroRotateTimer = setInterval(() => {
+                    heroSpotlightIndex = (heroSpotlightIndex + 1) % heroSpotlights.length;
+                    renderHeroSpotlight(heroSpotlights[heroSpotlightIndex], { soft: true });
+                    updateHeroDots();
+                }, 7500);
+            }
+        });
+    });
+}
+
+function updateHeroDots() {
+    const dots = document.getElementById('hero-dots');
+    if (!dots) return;
+    dots.querySelectorAll('.hero-dot').forEach((btn, i) => {
+        btn.classList.toggle('active', i === heroSpotlightIndex);
+    });
+}
+
+function renderHeroSpotlight(spot, opts = {}) {
     const heroSection = document.getElementById('hero-spotlight');
     if (!heroSection || !spot) return;
 
     currentSpotlightMovie = spot;
     heroSection.classList.remove('hidden');
+
+    const content = heroSection.querySelector('.hero-content');
+    if (opts.soft && content) {
+        content.classList.add('hero-fade');
+        requestAnimationFrame(() => {
+            setTimeout(() => content.classList.remove('hero-fade'), 280);
+        });
+    }
 
     const backdropEl = document.getElementById('hero-backdrop');
     if (backdropEl) {
@@ -668,7 +929,7 @@ function renderHeroSpotlight(spot) {
 
     const ratingEl = document.getElementById('hero-rating');
     if (ratingEl) {
-        ratingEl.textContent = spot.rating ? spot.rating : '8.8';
+        ratingEl.textContent = spot.rating ? spot.rating : '—';
     }
 
     const audioBadgeEl = document.getElementById('hero-audio-badge');
@@ -683,8 +944,9 @@ function renderHeroSpotlight(spot) {
     const detailBtn = document.getElementById('hero-detail-btn');
     const favBtn = document.getElementById('hero-fav-btn');
 
+    setListButtonState(favBtn, favSlugSet.has(spot.slug));
+
     floatBtn.onclick = () => {
-        // Prefer continue-watching for this slug (resume mid-episode / đúng tập)
         quickFloatMovie(spot.slug, spot.source || 'kkphim');
     };
 
@@ -694,8 +956,13 @@ function renderHeroSpotlight(spot) {
 
     favBtn.onclick = async () => {
         const isFav = await MovieService.toggleFavorite(spot);
-        favBtn.textContent = isFav ? 'Đã lưu' : 'Lưu phim';
-        showToast(isFav ? `Đã thêm "${spot.name}" vào Yêu Thích!` : `Đã bỏ khỏi Yêu Thích.`);
+        await refreshFavSet();
+        setListButtonState(favBtn, isFav);
+        showToast(isFav ? `Đã thêm "${spot.name}" vào Danh sách của tôi` : `Đã bỏ khỏi Danh sách`);
+        // Refresh mylist rail if on home
+        if (currentCategory === 'moi' && !currentSearchKeyword) {
+            // soft refresh of home is heavy — skip; next navigate will pick up
+        }
     };
 }
 
@@ -825,15 +1092,15 @@ async function loadMovies() {
 
     const catTitles = {
         'moi': 'Phim Mới Cập Nhật 2026',
-        'chieurap': 'Phim Chiếu Rạp 2025 - 2026',
-        'thuyetminh': 'Phim Thuyết Minh Mới Nhất',
-        'longtieng': 'Phim Lồng Tiếng Mới Nhất',
-        'bo': 'Phim Bộ Đang Hot',
-        'le': 'Phim Lẻ Đỉnh Cao',
-        'hoathinh': 'Anime & Hoạt Hình Mới Nhất',
-        'tvshows': 'TV Shows Truyền Hình',
-        'livetv': 'Kênh Truyền Hình & Luồng Trực Tiếp 24/7',
-        'favorites': 'Phim Yêu Thích Của Bạn'
+        'chieurap': 'Chiếu rạp',
+        'thuyetminh': 'Thuyết minh',
+        'longtieng': 'Lồng tiếng',
+        'bo': 'Phim bộ hot',
+        'le': 'Phim lẻ',
+        'hoathinh': 'Anime',
+        'tvshows': 'TV Shows',
+        'livetv': 'Truyền hình & luồng trực tiếp',
+        'favorites': 'Danh sách của tôi'
     };
 
     if (currentGenre) {
@@ -846,6 +1113,7 @@ async function loadMovies() {
     count.textContent = '';
 
     try {
+        await refreshFavSet();
         let items = [];
         if (currentGenre) {
             items = await MovieService.getByGenre(currentGenre, currentPage);
@@ -882,8 +1150,10 @@ async function searchMovies(keyword) {
 
     grid.innerHTML = Array(12).fill('<div class="skeleton-card"></div>').join('');
     title.textContent = `Kết quả tìm kiếm: "${keyword}"`;
+    MovieService.addRecentSearch(keyword);
 
     try {
+        await refreshFavSet();
         let items = await MovieService.search(keyword, currentSource, currentAudioFilter);
         count.textContent = `(${items.length} phim)`;
         renderGrid(items);
@@ -902,7 +1172,8 @@ async function loadFavorites() {
     const title = document.getElementById('section-title');
     const count = document.getElementById('result-count');
 
-    title.textContent = 'Phim Đã Lưu Yêu Thích';
+    title.textContent = 'Danh sách của tôi';
+    await refreshFavSet();
     let items = await MovieService.getFavorites();
 
     if (currentAudioFilter === 'thuyetminh') items = items.filter(it => it.hasThuyetMinh);
@@ -982,10 +1253,15 @@ async function openMovieDetail(slug, source = currentSource) {
         // Favorite button
         const favBtn = document.getElementById('modal-fav-btn');
         if (favBtn) {
+            setListButtonState(favBtn, favSlugSet.has(detail.slug));
             favBtn.onclick = async () => {
                 const isFav = await MovieService.toggleFavorite(detail);
-                favBtn.textContent = isFav ? 'Đã lưu' : 'Lưu';
-                showToast(isFav ? `Đã thêm "${detail.name}" vào Yêu Thích!` : `Đã bỏ khỏi Yêu Thích.`);
+                await refreshFavSet();
+                setListButtonState(favBtn, isFav);
+                if (currentSpotlightMovie?.slug === detail.slug) {
+                    setListButtonState(document.getElementById('hero-fav-btn'), isFav);
+                }
+                showToast(isFav ? `Đã thêm "${detail.name}" vào Danh sách của tôi` : `Đã bỏ khỏi Danh sách`);
             };
         }
 
