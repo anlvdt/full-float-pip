@@ -274,6 +274,31 @@ const MovieService = {
         return streams.find(c => c.slug === 'livetv-lofi') || streams[0] || null;
     },
 
+    extractYouTubeId(url) {
+        const s = String(url || '');
+        const m = s.match(/[?&]v=([a-zA-Z0-9_-]{11})/)
+            || s.match(/youtu\.be\/([a-zA-Z0-9_-]{11})/)
+            || s.match(/embed\/([a-zA-Z0-9_-]{11})/)
+            || s.match(/shorts\/([a-zA-Z0-9_-]{11})/);
+        return m ? m[1] : '';
+    },
+
+    /** Payload for native YouTube embed (preferEmbed avoids WKWebView watch-page bot wall). */
+    buildYouTubeLiveFloatInfo(stream, title) {
+        const id = stream?.youtubeId || this.extractYouTubeId(stream?.streamUrl || stream?.pageUrl || '');
+        const pageUrl = stream?.streamUrl || stream?.pageUrl || (id ? `https://www.youtube.com/watch?v=${id}` : '');
+        return {
+            pageUrl,
+            embedUrl: id ? `https://www.youtube.com/embed/${id}?autoplay=1&rel=0` : '',
+            title: title || stream?.name || 'Lofi coding',
+            site: 'youtube',
+            width: 1280,
+            height: 720,
+            currentTime: 0,
+            preferEmbed: true
+        };
+    },
+
     /**
      * Map genre display name → phimapi slug (best-effort).
      */

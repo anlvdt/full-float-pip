@@ -145,20 +145,15 @@ function initLofiCoding() {
     });
 }
 
-/** Float curated Lofi/Synthwave via YouTube live path (cookies + pageUrl). */
+/** Float curated Lofi/Synthwave via YouTube embed (not the watch-page bot wall). */
 async function floatLofiCoding() {
     const stream = MovieService.getDefaultLofiStream();
-    if (!stream?.streamUrl) return false;
+    if (!stream) return false;
+    const videoInfo = MovieService.buildYouTubeLiveFloatInfo(stream);
+    if (!videoInfo.pageUrl) return false;
     const res = await chrome.runtime.sendMessage({
         type: 'FLOAT_VIDEO_REQUEST',
-        videoInfo: {
-            pageUrl: stream.streamUrl,
-            title: stream.name || 'Lofi coding',
-            site: 'youtube',
-            width: 640,
-            height: 360,
-            currentTime: 0
-        }
+        videoInfo
     });
     if (res?.success) {
         setTimeout(() => window.close(), 300);
@@ -525,18 +520,16 @@ async function quickFloatMovie(slug, source) {
         if (found.servers[serverIdx]) server = found.servers[serverIdx];
     }
 
-    // Live YouTube channels: float via youtube path, not movie embed
-    if ((detail.source === 'livetv' || slug?.startsWith('livetv-')) && ep.pageUrl?.includes('youtube')) {
+    // Live YouTube channels: float via youtube embed path, not movie HLS
+    if ((detail.source === 'livetv' || slug?.startsWith('livetv-')) && (ep.pageUrl?.includes('youtube') || ep.linkEmbed?.includes('youtube'))) {
+        const videoInfo = MovieService.buildYouTubeLiveFloatInfo({
+            youtubeId: MovieService.extractYouTubeId(ep.pageUrl || ep.linkEmbed),
+            streamUrl: ep.pageUrl,
+            name: detail.name
+        }, detail.name);
         const res = await chrome.runtime.sendMessage({
             type: 'FLOAT_VIDEO_REQUEST',
-            videoInfo: {
-                pageUrl: ep.pageUrl,
-                title: detail.name,
-                site: 'youtube',
-                width: 640,
-                height: 360,
-                currentTime: 0
-            }
+            videoInfo
         });
         if (res?.success) {
             setTimeout(() => window.close(), 300);

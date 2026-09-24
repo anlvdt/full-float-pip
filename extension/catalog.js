@@ -266,18 +266,20 @@ function initUI() {
             directModal.classList.add('hidden');
             const isM3u8 = url.includes('.m3u8') || url.includes('.mp4');
             const isYt = url.includes('youtube.com') || url.includes('youtu.be');
-            await chrome.runtime.sendMessage({
-                type: 'FLOAT_VIDEO_REQUEST',
-                videoInfo: {
+            const videoInfo = isYt
+                ? MovieService.buildYouTubeLiveFloatInfo({ streamUrl: url, name: title }, title)
+                : {
                     src: isM3u8 ? url : '',
-                    embedUrl: (!isM3u8 && !isYt) ? url : '',
-                    pageUrl: isYt ? url : '',
-                    title: title,
-                    site: isYt ? 'youtube' : 'movie',
+                    embedUrl: !isM3u8 ? url : '',
+                    title,
+                    site: 'movie',
                     width: 640,
                     height: 360,
                     currentTime: 0
-                }
+                };
+            await chrome.runtime.sendMessage({
+                type: 'FLOAT_VIDEO_REQUEST',
+                videoInfo
             });
             showToast(`Đang phát nổi "${title}"`);
         });
@@ -807,20 +809,18 @@ async function quickFloatMovie(slug, source) {
         }
     }
 
-    // YouTube live channels → youtube float path
+    // YouTube live channels → youtube embed path (avoid watch-page bot wall)
     if ((detail.source === 'livetv' || slug?.startsWith('livetv-')) && (ep.pageUrl?.includes('youtube') || ep.linkEmbed?.includes('youtube.com/embed'))) {
         const pageUrl = ep.pageUrl || (ep.linkEmbed ? ep.linkEmbed.replace('/embed/', '/watch?v=').replace(/\?autoplay=1/, '') : '');
         if (pageUrl) {
+            const videoInfo = MovieService.buildYouTubeLiveFloatInfo({
+                youtubeId: MovieService.extractYouTubeId(pageUrl),
+                streamUrl: pageUrl,
+                name: detail.name
+            }, detail.name);
             const res = await chrome.runtime.sendMessage({
                 type: 'FLOAT_VIDEO_REQUEST',
-                videoInfo: {
-                    pageUrl,
-                    title: detail.name,
-                    site: 'youtube',
-                    width: 640,
-                    height: 360,
-                    currentTime: 0
-                }
+                videoInfo
             });
             if (res?.success) {
                 showToast('Đang phát nổi Lofi / Live YouTube');

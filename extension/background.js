@@ -130,6 +130,9 @@ class FloatVideoManager {
         if (videoInfo.movieContext && typeof videoInfo.movieContext === 'object') {
             message.movieContext = videoInfo.movieContext;
         }
+        if (videoInfo.preferEmbed) {
+            message.preferEmbed = true;
+        }
 
         // Player settings captured from the tab (captions/translate, rate,
         // sticky yt-player-* localStorage) — mirrored into the float window.
