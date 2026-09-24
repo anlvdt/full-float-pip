@@ -32,15 +32,17 @@ private final class PlaybackToast: NSView {
         textField.drawsBackground = false
         textField.textColor = .white
         textField.font = NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        textField.maximumNumberOfLines = 1
-        textField.lineBreakMode = .byTruncatingTail
+        textField.maximumNumberOfLines = 4
+        textField.lineBreakMode = .byWordWrapping
+        textField.cell?.wraps = true
+        textField.cell?.isScrollable = false
         textField.alignment = .left
         addSubview(textField)
     }
 
     required init?(coder: NSCoder) { fatalError() }
 
-    func present(_ message: String, symbol: String) {
+    func present(_ message: String, symbol: String, maxWidth: CGFloat) {
         textField.stringValue = message
         let config = NSImage.SymbolConfiguration(pointSize: 11, weight: .semibold)
         if let image = NSImage(systemSymbolName: symbol, accessibilityDescription: nil)?.withSymbolConfiguration(config) {
@@ -50,15 +52,22 @@ private final class PlaybackToast: NSView {
             iconView.isHidden = true
         }
         let font = textField.font ?? NSFont.systemFont(ofSize: 12.5, weight: .medium)
-        let textWidth = (message as NSString).size(withAttributes: [.font: font]).width
-        let height: CGFloat = 30
         let iconSide: CGFloat = iconView.isHidden ? 0 : 14
         let gap: CGFloat = iconView.isHidden ? 0 : 7
-        let width = min(460, ceil(textWidth) + 28 + iconSide + gap)
+        let textMax = max(96, maxWidth - 28 - iconSide - gap)
+        let measured = (message as NSString).boundingRect(
+            with: NSSize(width: textMax, height: 200),
+            options: [.usesLineFragmentOrigin, .usesFontLeading],
+            attributes: [.font: font]
+        )
+        let textW = min(textMax, ceil(measured.width) + 4)
+        let textH = ceil(measured.height) + 4
+        let height = max(32, textH + 14)
+        let width = min(maxWidth, textW + 24 + iconSide + gap)
         iconView.frame = NSRect(x: 12, y: (height - iconSide) / 2, width: iconSide, height: iconSide)
-        textField.frame = NSRect(x: 12 + iconSide + gap, y: (height - 16) / 2, width: ceil(textWidth) + 2, height: 16)
+        textField.frame = NSRect(x: 12 + iconSide + gap, y: (height - textH) / 2, width: textW, height: textH)
         frame.size = NSSize(width: width, height: height)
-        layer?.cornerRadius = height / 2
+        layer?.cornerRadius = min(16, height / 2)
     }
 }
 
@@ -77,10 +86,59 @@ private class LoadingOverlayView: NSView {
 
 // MARK: - DraggableTitleBar — Title bar that supports drag-to-move window
 
+private final class ControlBarView: NSView {
+    static let edgeWidth: CGFloat = 10
+
+    override func resetCursorRects() {
+        discardCursorRects()
+        addCursorRect(bounds, cursor: .arrow)
+        for sub in subviews where !sub.isHidden && sub.alphaValue > 0.01 {
+            let tip = sub.toolTip ?? ""
+            if sub is NSControl || sub is ModernScrubberView || !tip.isEmpty {
+                addCursorRect(sub.frame, cursor: .pointingHand)
+            }
+        }
+        let b = Self.edgeWidth
+        addCursorRect(NSRect(x: 0, y: 0, width: b, height: bounds.height), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: bounds.width - b, y: 0, width: b, height: bounds.height), cursor: .resizeLeftRight)
+    }
+}
+
+/// Transparent border above the video so the resize cursor shows on the edges
+/// even while another app is frontmost. The center passes hits through.
+private final class ResizeEdgeView: NSView {
+    var border: CGFloat = 16
+
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        let local = convert(point, from: superview)
+        guard bounds.contains(local) else { return nil }
+        return isEdge(local) ? self : nil
+    }
+
+    override func resetCursorRects() {
+        let b = border
+        let w = bounds.width
+        let h = bounds.height
+        guard w > b * 2, h > b * 2 else { return }
+        addCursorRect(NSRect(x: 0, y: b, width: b, height: h - b * 2), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: w - b, y: b, width: b, height: h - b * 2), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: b, y: 0, width: w - b * 2, height: b), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: b, y: h - b, width: w - b * 2, height: b), cursor: .resizeUpDown)
+        addCursorRect(NSRect(x: 0, y: 0, width: b, height: b), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: w - b, y: 0, width: b, height: b), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: 0, y: h - b, width: b, height: b), cursor: .resizeLeftRight)
+        addCursorRect(NSRect(x: w - b, y: h - b, width: b, height: b), cursor: .resizeLeftRight)
+    }
+
+    private func isEdge(_ local: NSPoint) -> Bool {
+        let b = border
+        return local.x < b || local.x > bounds.width - b || local.y < b || local.y > bounds.height - b
+    }
+}
+
 private final class ControlStripPanel: NSPanel {
     weak var owner: FloatWindow?
-    /// No dedicated resize gutters — the video window edges still resize.
-    static let resizeEdgeWidth: CGFloat = 0
+    static let resizeEdgeWidth: CGFloat = ControlBarView.edgeWidth
 
     override var canBecomeKey: Bool { false }
     override var canBecomeMain: Bool { false }
@@ -129,6 +187,7 @@ private final class ControlStripPanel: NSPanel {
         if point.x < edge || point.x > width - edge {
             NSCursor.resizeLeftRight.set()
         } else {
+            owner?.updateStripPointerFeedback()
             super.mouseMoved(with: event)
         }
     }
@@ -474,6 +533,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
     private var stripRightGrip: NSView?
     private var controlStrip: NSPanel?
     private var hudToast: PlaybackToast?
+    private var resizeEdgeView: ResizeEdgeView?
     private var hudHideWorkItem: DispatchWorkItem?
     var isPinned = false
     var autoDockPaused = false
@@ -551,6 +611,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
     private static let introEndBySlugKey = "FloatVideoIntroEndBySlug"
     /// Conservative OP / cold-open length for VN/KR drama & anime.
     private static let defaultIntroSeconds: Double = 90
+    /// Credits and next-episode preview that sit after the story.
+    private static let defaultOutroSeconds: Double = 180
     private static let minEpisodeSecondsForIntroSkip: Double = 360
 
     enum SizePreset: String, CaseIterable {
@@ -670,6 +732,10 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
     private var hideTimer: DispatchWorkItem?
     private var cursorPollTimer: Timer?
     private var cursorWasInside = false
+    private var hoverTip: NSPanel?
+    private var hoverTipLabel: NSTextField?
+    private var hoverTipAnchor: NSView?
+    private var hoverTipSince: Date?
     /// Idle delay before PiP chrome auto-hides when the cursor leaves the player/strip.
     private static let chromeHideDelay: TimeInterval = 2.5
 
@@ -828,7 +894,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         titleLabel.backgroundColor = .clear
         titleLabel.textColor = NSColor(white: 0.92, alpha: 1.0)
         titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
-        titleLabel.lineBreakMode = .byTruncatingTail
+        titleLabel.lineBreakMode = .byTruncatingMiddle
+        titleLabel.maximumNumberOfLines = 1
         titleLabel.autoresizingMask = [.width]
         titleBarView.addSubview(titleLabel)
 
@@ -850,6 +917,11 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
 
         container.addSubview(webView)
+        let edges = ResizeEdgeView(frame: container.bounds)
+        edges.border = resizeBorderWidth
+        edges.autoresizingMask = [.width, .height]
+        container.addSubview(edges)
+        resizeEdgeView = edges
 
         // Loading overlay (covers webView during loading)
         let overlay = LoadingOverlayView(frame: webFrame)
@@ -896,7 +968,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
         // Bottom control bar (shown on hover, modern Apple PiP style)
         let barH: CGFloat = VibePlacer.stripHeight
-        controlBarView = NSView(frame: NSRect(x: 0, y: 0, width: width, height: barH))
+        controlBarView = ControlBarView(frame: NSRect(x: 0, y: 0, width: width, height: barH))
         controlBarView.wantsLayer = true
         controlBarView.layer?.backgroundColor = NSColor(white: 0.07, alpha: 0.55).cgColor
         controlBarView.layer?.cornerRadius = 16
@@ -1906,62 +1978,58 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
                 playNative(src);
             }
 
-            // Wide masters (and rips with baked-in bars) letterbox inside the
-            // 16:9 window. Sample the frame and scale the picture so the black
-            // bands fall outside the window. A matching frame is left alone.
+            // The two black bands are inside the frame. Scale so the picture
+            // fills the window. The corner logo is allowed to be cropped.
             function applySmartFill() {
                 if (!v.videoWidth || v.readyState < 2) return;
-                var sampleW = 64, sampleH = 72;
+                var sampleW = 80, sampleH = 45;
                 var canvas = window.__floatFillCanvas || (window.__floatFillCanvas = document.createElement('canvas'));
                 canvas.width = sampleW;
                 canvas.height = sampleH;
                 var ctx = canvas.getContext('2d', { willReadFrequently: true });
-                var vr = v.videoWidth / v.videoHeight;
-                var fr = window.innerWidth / Math.max(window.innerHeight, 1);
                 try {
                     ctx.drawImage(v, 0, 0, sampleW, sampleH);
-                    var img = ctx.getImageData(0, 0, sampleW, sampleH);
-                    var data = img.data;
-                    function lumaRow(y) {
-                        var sum = 0;
-                        var o = y * sampleW * 4;
-                        for (var x = 8; x < sampleW - 8; x++) {
-                            var i = o + x * 4;
-                            sum += data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
-                        }
-                        return sum / (sampleW - 16);
+                    var data = ctx.getImageData(0, 0, sampleW, sampleH).data;
+                } catch (e) {
+                    return;
+                }
+                function lumaRow(y) {
+                    var sum = 0;
+                    var o = y * sampleW * 4;
+                    for (var x = 4; x < sampleW - 4; x++) {
+                        var i = o + x * 4;
+                        sum += data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
                     }
-                    var edge = 22;
-                    var top = 0;
-                    while (top < sampleH * 0.4 && lumaRow(top) < edge) top++;
-                    var bottom = sampleH - 1;
-                    while (bottom > sampleH * 0.55 && lumaRow(bottom) < edge) bottom--;
-                    // Near-black rows the hard cut missed still read as a bar.
-                    while (bottom > sampleH * 0.55 && lumaRow(bottom) < 36) bottom--;
-                    var mid = lumaRow((sampleH / 2) | 0);
-                    var topFrac = top / sampleH;
-                    var botFrac = (bottom + 1) / sampleH;
-                    // Push the bottom past the last dark row so it cannot sit on the edge.
-                    botFrac = Math.max(topFrac + 0.5, botFrac - 0.025);
-                    var span = botFrac - topFrac;
-                    var prevBottom = window.__floatContentBottom || 1;
-                    if (span < 0.98 && span > 0.5 && mid > 12 && botFrac < prevBottom - 0.004) {
-                        var scale = 1 / span;
-                        var center = (topFrac + botFrac) / 2;
-                        var ty = (0.5 - center) * scale * 100;
-                        v.style.objectFit = 'contain';
-                        v.style.transformOrigin = 'center center';
-                        v.style.transform = 'translateY(' + ty.toFixed(2) + '%) scale(' + scale.toFixed(4) + ')';
-                        window.__floatContentTop = topFrac;
-                        window.__floatContentBottom = botFrac;
-                        window.__floatFillLocked = true;
-                        return;
-                    }
-                } catch (e) {}
-                if (window.__floatFillLocked) return;
-                window.__floatContentTop = 0;
-                v.style.transform = 'none';
-                v.style.objectFit = vr > fr + 0.03 ? 'cover' : 'contain';
+                    return sum / (sampleW - 8);
+                }
+                var edge = 14;
+                var top = 0;
+                while (top < sampleH * 0.36 && lumaRow(top) < edge) top++;
+                var bottom = sampleH - 1;
+                while (bottom > sampleH * 0.64 && lumaRow(bottom) < edge) bottom--;
+                var mid = lumaRow((sampleH / 2) | 0);
+                if (mid < edge + 20) return;
+                var topFrac = top / sampleH;
+                var botFrac = (bottom + 1) / sampleH;
+                if (topFrac < 0.012 && botFrac > 0.988) {
+                    if (window.__floatFillLocked) return;
+                    v.style.transform = 'none';
+                    v.style.objectFit = 'contain';
+                    return;
+                }
+                // Eat a little of the picture so a leftover line and the logo go.
+                topFrac = Math.min(0.2, topFrac + 0.015);
+                botFrac = Math.max(0.8, botFrac - 0.015);
+                var span = botFrac - topFrac;
+                if (span < 0.55 || span > 0.98) return;
+                var scale = 1 / span;
+                var ty = ((scale - 1) * 0.5 - topFrac * scale) * 100;
+                v.style.objectFit = 'contain';
+                v.style.objectPosition = 'center center';
+                v.style.transformOrigin = 'center center';
+                v.style.transform = 'translateY(' + ty.toFixed(3) + '%) scale(' + scale.toFixed(4) + ')';
+                window.__floatContentTop = topFrac;
+                window.__floatFillLocked = true;
             }
             var fillTries = 0;
             function scheduleSmartFill() {
@@ -2519,50 +2587,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
             function applySmartFill(video) {
                 if (!video || !video.videoWidth || video.readyState < 2) return;
-                var sampleW = 48, sampleH = 36;
-                var canvas = window.__floatFillCanvas || (window.__floatFillCanvas = document.createElement('canvas'));
-                canvas.width = sampleW;
-                canvas.height = sampleH;
-                var ctx = canvas.getContext('2d', { willReadFrequently: true });
                 var vr = video.videoWidth / video.videoHeight;
                 var fr = window.innerWidth / Math.max(window.innerHeight, 1);
-                function setFit(fit, transform) {
-                    video.style.setProperty('object-fit', fit, 'important');
-                    video.style.setProperty('transform-origin', 'center center', 'important');
-                    video.style.setProperty('transform', transform, 'important');
-                }
-                try {
-                    ctx.drawImage(video, 0, 0, sampleW, sampleH);
-                    var data = ctx.getImageData(0, 0, sampleW, sampleH).data;
-                    function lumaRow(y) {
-                        var sum = 0;
-                        var o = y * sampleW * 4;
-                        for (var x = 6; x < sampleW - 6; x++) {
-                            var i = o + x * 4;
-                            sum += data[i] * 0.2126 + data[i + 1] * 0.7152 + data[i + 2] * 0.0722;
-                        }
-                        return sum / (sampleW - 12);
-                    }
-                    var edge = 16;
-                    var top = 0;
-                    while (top < sampleH * 0.32 && lumaRow(top) < edge) top++;
-                    var bottom = sampleH - 1;
-                    while (bottom > sampleH * 0.68 && lumaRow(bottom) < edge) bottom--;
-                    var mid = lumaRow((sampleH / 2) | 0);
-                    var topFrac = top / sampleH;
-                    var botFrac = (bottom + 1) / sampleH;
-                    var span = botFrac - topFrac;
-                    if (span < 0.96 && span > 0.5 && mid > edge + 10) {
-                        var scale = 1 / span;
-                        var center = (topFrac + botFrac) / 2;
-                        var ty = (0.5 - center) * scale * 100;
-                        setFit('contain', 'translateY(' + ty.toFixed(2) + '%) scale(' + scale.toFixed(4) + ')');
-                        window.__floatFillLocked = true;
-                        return;
-                    }
-                } catch (e) {}
-                if (window.__floatFillLocked) return;
-                setFit(vr > fr + 0.03 ? 'cover' : 'contain', 'none');
+                video.style.setProperty('transform', 'none', 'important');
+                video.style.setProperty('object-position', 'center center', 'important');
+                video.style.setProperty('object-fit', vr > fr + 0.01 ? 'cover' : 'contain', 'important');
+                window.__floatContentTop = 0;
+                window.__floatFillLocked = true;
             }
 
             function applyLayout() {
@@ -3094,9 +3125,116 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
                 // Strip shown: never leave ignoresMouseEvents=true under the cursor.
                 ensureStripAcceptsMouseWhileVisible()
             }
+            updateStripPointerFeedback()
         } else if cursorWasInside {
             cursorWasInside = false
+            hideHoverTip()
             if isHovering { scheduleHideControls(after: Self.chromeHideDelay) }
+        }
+    }
+
+    /// The strip is a non-key panel, so AppKit will not show view tooltips or
+    /// change the cursor while the IDE stays frontmost. Do both ourselves.
+    func updateStripPointerFeedback() {
+        guard let strip = controlStrip, let content = strip.contentView else {
+            hideHoverTip()
+            return
+        }
+        let local = strip.convertPoint(fromScreen: NSEvent.mouseLocation)
+        guard content.bounds.contains(local), let hit = content.hitTest(local) else {
+            hideHoverTip()
+            return
+        }
+        let edge = ControlBarView.edgeWidth
+        if local.x < edge || local.x > content.bounds.width - edge {
+            NSCursor.resizeLeftRight.set()
+            hideHoverTip()
+            return
+        }
+        var control: NSView?
+        var view: NSView? = hit
+        while let current = view, current !== content {
+            let tip = current.toolTip ?? ""
+            if !current.isHidden, (current is NSControl || current is ModernScrubberView), !tip.isEmpty {
+                control = current
+                break
+            }
+            view = current.superview
+        }
+        guard let control, let text = control.toolTip, !text.isEmpty else {
+            NSCursor.arrow.set()
+            hideHoverTip()
+            return
+        }
+        NSCursor.pointingHand.set()
+        if hoverTipAnchor !== control {
+            hoverTipAnchor = control
+            hoverTipSince = Date()
+            hideHoverTip(keepAnchor: true)
+            return
+        }
+        guard let since = hoverTipSince, Date().timeIntervalSince(since) >= 0.35 else { return }
+        showHoverTip(text, anchor: control)
+    }
+
+    private func showHoverTip(_ text: String, anchor: NSView) {
+        guard let strip = controlStrip else { return }
+        let label = hoverTipLabel ?? NSTextField(labelWithString: "")
+        hoverTipLabel = label
+        label.stringValue = text
+        label.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        label.textColor = .white
+        label.alignment = .center
+        label.drawsBackground = false
+        label.isBezeled = false
+        label.isBordered = false
+        let width = min(240, ceil((text as NSString).size(withAttributes: [.font: label.font as Any]).width) + 18)
+        let height: CGFloat = 22
+        label.frame = NSRect(x: 0, y: 3, width: width, height: 16)
+        let panel: NSPanel
+        if let existing = hoverTip {
+            panel = existing
+        } else {
+            let created = NSPanel(
+                contentRect: NSRect(x: 0, y: 0, width: width, height: height),
+                styleMask: [.borderless, .nonactivatingPanel],
+                backing: .buffered,
+                defer: false
+            )
+            created.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 4)
+            created.isOpaque = false
+            created.backgroundColor = .clear
+            created.hasShadow = true
+            created.ignoresMouseEvents = true
+            created.hidesOnDeactivate = false
+            created.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+            let bg = NSView(frame: NSRect(x: 0, y: 0, width: width, height: height))
+            bg.wantsLayer = true
+            bg.layer?.backgroundColor = NSColor(white: 0.08, alpha: 0.94).cgColor
+            bg.layer?.cornerRadius = 6
+            created.contentView = bg
+            hoverTip = created
+            panel = created
+        }
+        if label.superview == nil {
+            panel.contentView?.addSubview(label)
+        }
+        panel.contentView?.frame.size = NSSize(width: width, height: height)
+        let anchorOnScreen = strip.convertToScreen(anchor.convert(anchor.bounds, to: nil))
+        panel.setFrame(NSRect(
+            x: anchorOnScreen.midX - width / 2,
+            y: anchorOnScreen.maxY + 6,
+            width: width,
+            height: height
+        ), display: true)
+        panel.orderFrontRegardless()
+    }
+
+    private func hideHoverTip(keepAnchor: Bool = false) {
+        hoverTip?.orderOut(nil)
+        if !keepAnchor {
+            hoverTipAnchor = nil
+            hoverTipSince = nil
         }
     }
 
@@ -3433,6 +3571,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         cursorPollTimer = nil
         vibeDock.stop()
         VibeNowPlaying.clear()
+        hideHoverTip()
         controlStrip?.orderOut(nil)
         controlStrip?.close()
         controlStrip = nil
@@ -3790,7 +3929,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         lastPlaybackSample = 0
     }
 
-    private func handleWatchAssist(currentTime ct: Double, duration dur: Double, paused: Bool) {
+    private func handleWatchAssist(currentTime ct: Double, duration dur: Double, paused: Bool, ended: Bool = false) {
         // The page we just left still reports "at the credits" for a moment.
         // Acting on that sample skips the episode that is trying to start.
         guard !suppressWatchAssist else { return }
@@ -3803,7 +3942,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         }
         lastPlaybackSample = ct
 
-        guard !paused, dur.isFinite, dur > 1 else { return }
+        let playing = !paused || ended
+        guard playing, dur.isFinite, dur > 1 else { return }
 
         // Auto skip intro — once per episode, long-form only.
         if Self.preferredAutoSkipIntro,
@@ -3823,15 +3963,17 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
             }
         }
 
-        // Auto next episode near end.
+        // Skip the end credits and next-episode preview, then open the next one.
         guard Self.preferredAutoNextEpisode,
               movieContext?.hasPlaylist == true,
-              !didAutoAdvanceThisEpisode,
-              !paused else { return }
-        // Ignore tiny/unready durations. A fresh <video> sometimes reports a
-        // bogus short duration equal to currentTime and would skip immediately.
-        if dur >= 60, ct > 20, ct >= dur - 5 {
+              !didAutoAdvanceThisEpisode else { return }
+        let watchedEnough = ct > max(Self.defaultIntroSeconds + 30, dur * 0.5)
+        let inOutro = dur >= Self.minEpisodeSecondsForIntroSkip && ct >= dur - Self.defaultOutroSeconds
+        let fileEnded = ended && ct > 60
+        if watchedEnough && (inOutro || fileEnded) {
             didAutoAdvanceThisEpisode = true
+            NSLog("[FloatVideo] Skip outro ct=\(Int(ct)) dur=\(Int(dur)) ended=\(ended)")
+            showHUD("Đã bỏ qua giới thiệu cuối")
             _ = switchEpisode(by: 1)
         }
     }
@@ -3909,6 +4051,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         if showSlider {
             volumeSlider?.frame = NSRect(x: x, y: rowY + 6, width: min(84, right - x - 8), height: 20)
         }
+        controlBarView.window?.invalidateCursorRects(for: controlBarView)
     }
 
     private func makePrimaryPlayButton(action: Selector) -> NSButton {
@@ -4296,7 +4439,16 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
                 var mp = document.querySelector('#movie_player, .html5-video-player');
                 var ads = !!(mp && (mp.classList.contains('ad-showing') ||
                                     mp.classList.contains('ad-interrupting')));
-                return { ct: v.currentTime || 0, dur: v.duration || 0, vol: v.volume, muted: v.muted, paused: v.paused,
+                var dur = v.duration;
+                if (!isFinite(dur) || dur < 1) {
+                    try {
+                        if (v.seekable && v.seekable.length) {
+                            dur = v.seekable.end(v.seekable.length - 1);
+                        }
+                    } catch (e) {}
+                }
+                return { ct: v.currentTime || 0, dur: (isFinite(dur) ? dur : 0), vol: v.volume, muted: v.muted, paused: v.paused,
+                         ended: !!v.ended,
                          streamFailed: !!window.__floatStreamFailed,
                          skips: window.__floatVideoAdSkipCount || 0,
                          ff: window.__floatVideoAdFFCount || 0,
@@ -4331,11 +4483,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
             if (dict["streamFailed"] as? Bool) == true {
                 self.fallbackToEmbedIfDirectFailed()
             }
-            let ct = dict["ct"] as? Double ?? 0
-            let dur = dict["dur"] as? Double ?? 0
-            let vol = dict["vol"] as? Double ?? 1
+            let ct = (dict["ct"] as? NSNumber)?.doubleValue ?? 0
+            let dur = (dict["dur"] as? NSNumber)?.doubleValue ?? 0
+            let vol = (dict["vol"] as? NSNumber)?.doubleValue ?? 1
             let muted = dict["muted"] as? Bool ?? false
             let paused = dict["paused"] as? Bool ?? true
+            let ended = dict["ended"] as? Bool ?? false
 
             let skips = (dict["skips"] as? NSNumber)?.intValue ?? 0
             if skips > self.lastAdSkipCount {
@@ -4381,7 +4534,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
             self.isPlaying = !paused
             self.playbackElapsed = ct
             self.playbackDuration = dur
-            self.handleWatchAssist(currentTime: ct, duration: dur, paused: paused)
+            self.handleWatchAssist(currentTime: ct, duration: dur, paused: paused, ended: ended)
             self.setButtonSymbol(self.playPauseButton, paused ? "play.fill" : "pause.fill")
             VibeNowPlaying.update(
                 title: self.videoTitle,
@@ -4648,7 +4801,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
             NSLog("[FloatVideo] HUD: \(message)")
             return
         }
-        hud.present(message, symbol: Self.toastSymbol(for: message))
+        let maxWidth = max(120, container.bounds.width - 24)
+        hud.present(message, symbol: Self.toastSymbol(for: message), maxWidth: maxWidth)
         hud.isHidden = false
         let y = container.bounds.height - 30 - 10 - hud.frame.height
         hud.frame.origin = CGPoint(
@@ -4817,7 +4971,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         menu.addItem(item("Thu nhỏ (−)", action: #selector(shrinkWindow)))
         if movieContext != nil {
             menu.addItem(NSMenuItem.separator())
-            let autoNextTitle = Self.preferredAutoNextEpisode ? "✓ Tập sau tự động" : "Tập sau tự động"
+            let autoNextTitle = Self.preferredAutoNextEpisode ? "✓ Tập sau, bỏ qua cuối phim" : "Tập sau, bỏ qua cuối phim"
             menu.addItem(item(autoNextTitle, action: #selector(toggleAutoNextEpisode)))
             let autoIntroTitle = Self.preferredAutoSkipIntro ? "✓ Tự bỏ qua giới thiệu" : "Tự bỏ qua giới thiệu"
             menu.addItem(item(autoIntroTitle, action: #selector(toggleAutoSkipIntro)))
@@ -4948,6 +5102,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         let bounds = container.bounds
         // Controls live on the external strip — video uses the full panel.
         webView.frame = bounds
+        resizeEdgeView?.frame = bounds
         loadingOverlay?.frame = webView.frame
         if titleBarView != nil {
             let titleH = titleBarView.frame.height > 0 ? titleBarView.frame.height : 30
