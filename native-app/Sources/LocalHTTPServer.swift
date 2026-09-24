@@ -9,6 +9,8 @@ class LocalHTTPServer {
     private(set) var port: UInt16 = 0
     private var isReady = false
 
+    var onCommand: ((String, [String: String]) -> [String: Any]?)?
+
     func start(completion: @escaping (UInt16) -> Void) {
         do {
             let params = NWParameters.tcp
@@ -25,6 +27,10 @@ class LocalHTTPServer {
                     self?.port = port
                     self?.isReady = true
                     NSLog("[FloatVideo] HTTP server ready on port \(port)")
+                    // Save port for CLI & Agent hooks
+                    let home = FileManager.default.homeDirectoryForCurrentUser
+                    let portFile = home.appendingPathComponent(".floatvideo_port")
+                    try? "\(port)".write(to: portFile, atomically: true, encoding: .utf8)
                     completion(port)
                 }
             case .failed(let error):
@@ -85,8 +91,32 @@ class LocalHTTPServer {
             handlePlayRequest(path: path, connection: connection)
         } else if path == "/health" {
             sendResponse(connection: connection, body: "OK", contentType: "text/plain")
+        } else if path.hasPrefix("/api/") {
+            handleApiRequest(path: path, connection: connection)
         } else {
             sendErrorResponse(connection: connection, code: 404, message: "Not Found")
+        }
+    }
+
+    // MARK: - API Request Handler (Vibe-Sync & Automation)
+
+    private func handleApiRequest(path: String, connection: NWConnection) {
+        guard let urlComponents = URLComponents(string: "http://localhost\(path)") else {
+            sendErrorResponse(connection: connection, code: 400, message: "Invalid URL")
+            return
+        }
+        let command = String(urlComponents.path.dropFirst("/api/".count))
+        var params: [String: String] = [:]
+        for item in urlComponents.queryItems ?? [] {
+            params[item.name] = item.value ?? ""
+        }
+
+        let result = onCommand?(command, params) ?? ["success": true, "command": command]
+        if let jsonData = try? JSONSerialization.data(withJSONObject: result, options: []),
+           let jsonString = String(data: jsonData, encoding: .utf8) {
+            sendResponse(connection: connection, body: jsonString, contentType: "application/json; charset=utf-8")
+        } else {
+            sendResponse(connection: connection, body: "{\"success\":true}", contentType: "application/json; charset=utf-8")
         }
     }
 

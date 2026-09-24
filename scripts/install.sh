@@ -33,7 +33,12 @@ INSTALL_DIR="$HOME/Library/Application Support/FloatVideo"
 mkdir -p "$INSTALL_DIR"
 cp "$BUILD_OUTPUT" "$INSTALL_DIR/FloatVideo"
 chmod +x "$INSTALL_DIR/FloatVideo"
-echo "Installed to: $INSTALL_DIR/FloatVideo"
+# Ad-hoc sign after copy — unsigned/invalid pages get SIGKILL and Chrome still
+# reports "playing" because postMessage already returned success.
+xattr -cr "$INSTALL_DIR/FloatVideo" 2>/dev/null || true
+codesign --force --sign - --identifier "com.aspect.floatvideo" --timestamp=none "$INSTALL_DIR/FloatVideo" 2>/dev/null \
+  || codesign --force --sign - "$INSTALL_DIR/FloatVideo"
+echo "Installed and signed: $INSTALL_DIR/FloatVideo"
 
 # ---- Step 3: Create Native Messaging Host wrapper script ----
 echo ""

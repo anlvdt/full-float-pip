@@ -31,8 +31,9 @@ class NativeMessageHandler {
             let hasVideoSrc = !((message["videoSrc"] as? String ?? "").isEmpty)
             let hasEmbedURL = !((message["embedUrl"] as? String ?? "").isEmpty)
             let cookieCount = (message["cookies"] as? [[String: Any]])?.count ?? 0
-            return "action=open site=\(site) size=\(width)x\(height) time=\(currentTime) videoSrc=\(hasVideoSrc) embedUrl=\(hasEmbedURL) cookies=\(cookieCount) url=\(url)"
-        case "close", "ping":
+            let hasMovie = message["movieContext"] != nil
+            return "action=open site=\(site) size=\(width)x\(height) time=\(currentTime) videoSrc=\(hasVideoSrc) embedUrl=\(hasEmbedURL) cookies=\(cookieCount) movieContext=\(hasMovie) url=\(url)"
+        case "close", "ping", "nextEpisode", "prevEpisode":
             return "action=\(action)"
         default:
             return "action=\(action) keys=\(message.keys.sorted())"
@@ -46,6 +47,11 @@ class NativeMessageHandler {
             let status = message["status"] as? String ?? "unknown"
             let title = truncated(message["title"] as? String ?? "")
             return title.isEmpty ? "type=status status=\(status)" : "type=status status=\(status) title=\(title)"
+        case "PROGRESS":
+            let slug = truncated(message["slug"] as? String ?? "", maxLength: 40)
+            let ep = truncated(message["epName"] as? String ?? "", maxLength: 40)
+            let ct = message["currentTime"] ?? 0
+            return "type=PROGRESS slug=\(slug) ep=\(ep) t=\(ct)"
         case "error":
             let error = truncated(message["error"] as? String ?? "")
             return "type=error error=\(error)"
@@ -141,8 +147,14 @@ class NativeMessageHandler {
                 let lengthData = Data(bytes: &length, count: 4)
 
                 // 2. Write JSON message body
-                self.outputHandle.write(lengthData)
-                self.outputHandle.write(jsonData)
+                do {
+                    try self.outputHandle.write(contentsOf: lengthData)
+                    try self.outputHandle.write(contentsOf: jsonData)
+                } catch {
+                    // Chrome often closes stdin/stdout before our async reply flush.
+                    NSLog("[FloatVideo] Output write failed (Chrome disconnected?): \(error)")
+                    return
+                }
 
                 NSLog("[FloatVideo] Sent message summary: \(self.summarizeOutgoingMessage(message))")
             } catch {

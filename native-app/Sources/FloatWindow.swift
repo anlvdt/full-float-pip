@@ -19,44 +19,424 @@ private class LoadingOverlayView: NSView {
 
 // MARK: - DraggableTitleBar — Title bar that supports drag-to-move window
 
-private class DraggableTitleBar: NSView {
+private final class ControlStripPanel: NSPanel {
+    weak var owner: FloatWindow?
+    /// Left/right grip width — wide enough for coding-safe (~380) strips.
+    static let resizeEdgeWidth: CGFloat = 28
+
+    override var canBecomeKey: Bool { false }
+    override var canBecomeMain: Bool { false }
+
+    /// Intercept edge presses before subviews so L/R resize stays solid.
+    override func sendEvent(_ event: NSEvent) {
+        if event.type == .leftMouseDown {
+            let point = event.locationInWindow
+            let width = contentView?.bounds.width ?? frame.width
+            let edge = Self.resizeEdgeWidth
+            if point.x < edge || point.x > width - edge {
+                owner?.noteStripInteraction()
+                owner?.trackResizeFromStrip()
+                return
+            }
+        }
+        super.sendEvent(event)
+    }
+
     override func mouseDown(with event: NSEvent) {
-        window?.performDrag(with: event)
+        guard let owner = owner else {
+            super.mouseDown(with: event)
+            return
+        }
+        owner.noteStripInteraction()
+        let point = event.locationInWindow
+        let width = contentView?.bounds.width ?? frame.width
+        let edge = Self.resizeEdgeWidth
+        // Pin only blocks auto-dock — manual edge resize must always work.
+        if point.x < edge || point.x > width - edge {
+            owner.trackResizeFromStrip()
+            return
+        }
+        if hitIsControl(point) {
+            super.mouseDown(with: event)
+            return
+        }
+        owner.trackMoveFromStrip()
+    }
+
+    override func mouseMoved(with event: NSEvent) {
+        owner?.noteStripInteraction()
+        let point = event.locationInWindow
+        let width = contentView?.bounds.width ?? frame.width
+        let edge = Self.resizeEdgeWidth
+        if point.x < edge || point.x > width - edge {
+            NSCursor.resizeLeftRight.set()
+        } else {
+            super.mouseMoved(with: event)
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        owner?.noteStripInteraction()
+        super.mouseEntered(with: event)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        // Defer hide to FloatWindow's idle timer — never thrash on strip exit.
+        owner?.noteStripPointerExited()
+        super.mouseExited(with: event)
+    }
+
+    private func hitIsControl(_ point: NSPoint) -> Bool {
+        // Edge grips win over buttons so resize stays discoverable.
+        let width = contentView?.bounds.width ?? frame.width
+        let edge = Self.resizeEdgeWidth
+        if point.x < edge || point.x > width - edge { return false }
+        guard let hit = contentView?.hitTest(point) else { return false }
+        var view: NSView? = hit
+        while let current = view, current !== contentView {
+            if current is NSControl || current is ModernScrubberView { return true }
+            view = current.superview
+        }
+        return false
     }
 }
 
-// MARK: - ProgressClickView — Progress bar click area
+private class DraggableTitleBar: NSView {
+    var isLocked = false
 
-private class ProgressClickView: NSView {
-    var onSeek: ((Double) -> Void)?
+    override func hitTest(_ point: NSPoint) -> NSView? {
+        if isHidden || alphaValue < 0.05 { return nil }
+        return super.hitTest(point)
+    }
 
     override func mouseDown(with event: NSEvent) {
+        let float = window as? FloatWindow
+        if isLocked || float?.isPinned == true { return }
+        float?.autoDockPaused = true
+        window?.performDrag(with: event)
+        float?.autoDockPaused = false
+        float?.vibeDock.noteUserDidPlace()
+    }
+}
+
+// MARK: - ModernScrubberView — Apple-grade video timeline scrubber bar
+
+private class ModernScrubberView: NSView {
+    var onSeek: ((Double) -> Void)?
+    var isDragging = false
+
+    private let trackBg = NSView()
+    private let trackProgress = NSView()
+    private let knobView = NSView()
+    private var trackingArea: NSTrackingArea?
+    private var isHovered = false
+
+    private let normalTrackHeight: CGFloat = 4.0
+    private let hoverTrackHeight: CGFloat = 6.0
+    private let normalKnobSize: CGFloat = 11.0
+    private let hoverKnobSize: CGFloat = 14.0
+
+    private var currentProgress: CGFloat = 0
+
+    override init(frame frameRect: NSRect) {
+        super.init(frame: frameRect)
+        setupViews()
+    }
+
+    required init?(coder: NSCoder) {
+        super.init(coder: coder)
+        setupViews()
+    }
+
+    private func setupViews() {
+        wantsLayer = true
+
+        // Background track (subtle translucent gray)
+        trackBg.wantsLayer = true
+        trackBg.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.28).cgColor
+        trackBg.layer?.cornerRadius = normalTrackHeight / 2
+        addSubview(trackBg)
+
+        // Played track (vivid red accent)
+        trackProgress.wantsLayer = true
+        trackProgress.layer?.backgroundColor = NSColor(red: 1.0, green: 0.23, blue: 0.36, alpha: 1.0).cgColor
+        trackProgress.layer?.cornerRadius = normalTrackHeight / 2
+        addSubview(trackProgress)
+
+        // Scrubber Knob (white circle with drop shadow)
+        knobView.wantsLayer = true
+        knobView.layer?.backgroundColor = NSColor.white.cgColor
+        knobView.layer?.cornerRadius = normalKnobSize / 2
+        knobView.layer?.shadowColor = NSColor.black.cgColor
+        knobView.layer?.shadowOpacity = 0.55
+        knobView.layer?.shadowRadius = 3
+        knobView.layer?.shadowOffset = CGSize(width: 0, height: -1)
+        addSubview(knobView)
+    }
+
+    override func updateTrackingAreas() {
+        super.updateTrackingAreas()
+        if let existing = trackingArea {
+            removeTrackingArea(existing)
+        }
+        trackingArea = NSTrackingArea(
+            rect: bounds,
+            options: [.mouseEnteredAndExited, .activeAlways, .inVisibleRect],
+            owner: self,
+            userInfo: nil
+        )
+        if let ta = trackingArea {
+            addTrackingArea(ta)
+        }
+    }
+
+    override func mouseEntered(with event: NSEvent) {
+        isHovered = true
+        animateTrack(expand: true)
+    }
+
+    override func mouseExited(with event: NSEvent) {
+        if !isDragging {
+            isHovered = false
+            animateTrack(expand: false)
+        }
+    }
+
+    private func animateTrack(expand: Bool) {
+        NSAnimationContext.runAnimationGroup { ctx in
+            ctx.duration = 0.15
+            self.layoutSublayers(expanded: expand)
+        }
+    }
+
+    override func layout() {
+        super.layout()
+        layoutSublayers(expanded: isHovered || isDragging)
+    }
+
+    private func layoutSublayers(expanded: Bool) {
+        let th = expanded ? hoverTrackHeight : normalTrackHeight
+        let ks = expanded ? hoverKnobSize : normalKnobSize
+        let trackY = (bounds.height - th) / 2
+
+        trackBg.frame = NSRect(x: 0, y: trackY, width: bounds.width, height: th)
+        trackBg.layer?.cornerRadius = th / 2
+
+        let pw = max(0, min(bounds.width, bounds.width * currentProgress))
+        trackProgress.frame = NSRect(x: 0, y: trackY, width: pw, height: th)
+        trackProgress.layer?.cornerRadius = th / 2
+
+        let knobX = max(0, min(bounds.width - ks, pw - ks / 2))
+        let knobY = (bounds.height - ks) / 2
+        knobView.frame = NSRect(x: knobX, y: knobY, width: ks, height: ks)
+        knobView.layer?.cornerRadius = ks / 2
+    }
+
+    func setProgress(_ fraction: CGFloat) {
+        guard !isDragging else { return }
+        currentProgress = max(0, min(1.0, fraction))
+        needsLayout = true
+    }
+
+    override func mouseDown(with event: NSEvent) {
+        isDragging = true
+        animateTrack(expand: true)
+        handleMouseEvent(event)
+    }
+
+    override func mouseDragged(with event: NSEvent) {
+        handleMouseEvent(event)
+    }
+
+    override func mouseUp(with event: NSEvent) {
+        handleMouseEvent(event)
+        isDragging = false
+        if !isHovered {
+            animateTrack(expand: false)
+        }
+    }
+
+    private func handleMouseEvent(_ event: NSEvent) {
         let loc = convert(event.locationInWindow, from: nil)
-        let percent = max(0, min(1, Double(loc.x / bounds.width)))
+        let percent = max(0, min(1.0, Double(loc.x / bounds.width)))
+        currentProgress = CGFloat(percent)
+        needsLayout = true
         onSeek?(percent)
+    }
+}
+
+// MARK: - Movie playlist context (continue-watching / episode nav)
+
+struct MovieEpisodeItem {
+    let name: String
+    let slug: String
+    let linkM3u8: String
+    let linkEmbed: String
+
+    init?(dict: [String: Any]) {
+        let name = dict["name"] as? String ?? ""
+        let slug = dict["slug"] as? String ?? ""
+        let m3u8 = dict["linkM3u8"] as? String ?? ""
+        let embed = dict["linkEmbed"] as? String ?? ""
+        guard !name.isEmpty || !slug.isEmpty || !m3u8.isEmpty || !embed.isEmpty else { return nil }
+        self.name = name.isEmpty ? (slug.isEmpty ? "Tập" : slug) : name
+        self.slug = slug
+        self.linkM3u8 = m3u8
+        self.linkEmbed = embed
+    }
+}
+
+struct MovieServerItem {
+    let name: String
+    let items: [MovieEpisodeItem]
+
+    init?(dict: [String: Any]) {
+        let name = dict["name"] as? String ?? "Server"
+        let rawItems = dict["items"] as? [[String: Any]] ?? []
+        let items = rawItems.compactMap { MovieEpisodeItem(dict: $0) }
+        guard !items.isEmpty else { return nil }
+        self.name = name
+        self.items = items
+    }
+}
+
+struct MovieContext {
+    var slug: String
+    var name: String
+    var source: String
+    var poster: String
+    var serverIdx: Int
+    var epIdx: Int
+    var servers: [MovieServerItem]
+
+    init?(dict: [String: Any]) {
+        let slug = dict["slug"] as? String ?? ""
+        guard !slug.isEmpty else { return nil }
+        self.slug = slug
+        self.name = dict["name"] as? String ?? slug
+        self.source = dict["source"] as? String ?? ""
+        self.poster = dict["poster"] as? String ?? ""
+        self.serverIdx = dict["serverIdx"] as? Int ?? (dict["serverIdx"] as? NSNumber)?.intValue ?? 0
+        self.epIdx = dict["epIdx"] as? Int ?? (dict["epIdx"] as? NSNumber)?.intValue ?? 0
+        let rawServers = dict["servers"] as? [[String: Any]] ?? []
+        self.servers = rawServers.compactMap { MovieServerItem(dict: $0) }
+        if self.serverIdx < 0 || self.serverIdx >= self.servers.count {
+            self.serverIdx = 0
+        }
+        if let server = self.servers[safe: self.serverIdx] {
+            if self.epIdx < 0 || self.epIdx >= server.items.count {
+                self.epIdx = 0
+            }
+        } else {
+            self.epIdx = 0
+        }
+    }
+
+    var currentEpisode: MovieEpisodeItem? {
+        guard let server = servers[safe: serverIdx] else { return nil }
+        return server.items[safe: epIdx]
+    }
+
+    var hasPlaylist: Bool {
+        (servers.first?.items.count ?? 0) > 1 || servers.count > 1
+    }
+
+    mutating func moveEpisode(by delta: Int) -> MovieEpisodeItem? {
+        guard let server = servers[safe: serverIdx], !server.items.isEmpty else { return nil }
+        let next = epIdx + delta
+        guard next >= 0, next < server.items.count else { return nil }
+        epIdx = next
+        return server.items[epIdx]
+    }
+}
+
+private extension Array {
+    subscript(safe index: Int) -> Element? {
+        guard index >= 0, index < count else { return nil }
+        return self[index]
     }
 }
 
 // MARK: - FloatWindow — Always-on-top floating video window
 
-class FloatWindow: NSPanel, WKNavigationDelegate {
+class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate {
 
     private var webView: WKWebView!
     private var titleBarView: NSView!
     private var titleLabel: NSTextField!
     private var controlBarView: NSView!
+    private var scrubberView: ModernScrubberView!
     private var playPauseButton: NSButton!
+    private var rewindButton: NSButton!
     private var skipButton: NSButton!
     private var volumeButton: NSButton!
     private var volumeSlider: NSSlider!
+    private var speedButton: NSButton!
+    private var maximizeButton: NSButton!
+    private var sizeDownButton: NSButton?
+    private var sizeUpButton: NSButton?
+    private var sizePresetMiniButton: NSButton?
+    private var sizePresetStandardButton: NSButton?
+    private var sizePresetWideButton: NSButton?
+    private var selectedSizePreset: SizePreset = .standard
+    private var presetHoldWorkItem: DispatchWorkItem?
+    private var stripAutoNextButton: NSButton?
+    private var stripSkipIntroButton: NSButton?
+    /// Per-episode: auto-skip intro already fired / user seeked manually.
+    private var didAutoSkipIntroThisEpisode = false
+    private var userSeekedThisEpisode = false
+    private var didAutoAdvanceThisEpisode = false
+    private var lastPlaybackSample: Double = 0
     private var timeLabel: NSTextField!
-    private var progressBg: NSView!
-    private var progressPlayed: NSView!
+    private var resizeIndicator: NSTextField?
     private var updateTimer: Timer?
-    private var videoTitle: String
-    private var isPlaying = true
+    private var pinButton: NSButton?
+    private var stripCloseButton: NSButton?
+    private var stripGhostButton: NSButton?
+    private var stripDuckButton: NSButton?
+    private var stripPrevEpisodeButton: NSButton?
+    private var stripNextEpisodeButton: NSButton?
+    private var stripMoreButton: NSButton?
+    /// Visible L/R resize affordances on the external strip (non-interactive views).
+    private var stripLeftGrip: NSView?
+    private var stripRightGrip: NSView?
+    private var controlStrip: NSPanel?
+    private var hudLabel: NSTextField?
+    private var hudHideWorkItem: DispatchWorkItem?
+    var isPinned = false
+    var autoDockPaused = false
+    var isResizeActive: Bool { isResizing }
+    let vibeDock = VibeDock()
+    private(set) var playbackElapsed: Double = 0
+    private(set) var playbackDuration: Double = 0
+    var playbackRate: Double { playbackRates[currentRateIndex] }
+    var videoTitle: String
+    var isPlaying = false
     private var userWantsMute = false
     private var videoAspectRatio: CGFloat = 16.0 / 9.0
+    var isGhostMode = false
+    private var preGhostAlpha: CGFloat = 1.0
+    private var preDuckVolume: Double = 1.0
+    private var isDucked = false
+    private var isCodingSafeMode = false
+    private var preSafeFrame: NSRect = .zero
+    private var preSafeAlpha: CGFloat = 1.0
+    private var pausedForBoss = false
+    var isWindowVisible = true
+    var currentVolume: Double { return volumeSlider?.doubleValue ?? 1.0 }
+    private var currentEmbedUrl: String?
+    private var hasTriedIframeEmbedFallback = false
+    private var isMaximized = false
+    private var preMaximizeFrame: NSRect = .zero
+    private let playbackRates: [Double] = [1.0, 1.25, 1.5, 1.75, 2.0, 0.75]
+    private var currentRateIndex = 0
+    private var lastMouseLocation: NSPoint = .zero
+    private var mouseIdleTicks = 0
+    private var movieContext: MovieContext?
+    private var lastProgressSentAt: Date = .distantPast
+    private let progressHeartbeatInterval: TimeInterval = 20
+    /// Emits continue-watching PROGRESS payloads to Chrome via Native Messaging.
+    var onProgress: (([String: Any]) -> Void)?
 
     // Video loading parameters (used by WKNavigationDelegate callbacks)
     private var currentSite: String = "generic"
@@ -86,14 +466,135 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     private var loadingStrategy: LoadingStrategy = .fullPageInject
 
     private static let frameKey = "FloatVideoWindowFrame"
+    static let ghostPrefKey = "FloatVideoGhostPreferred"
+    private static let opacityPrefKey = "FloatVideoCodingOpacity"
+    private static let sizePresetKey = "FloatVideoSizePreset"
+    static let autoNextEpisodePrefKey = "FloatVideoAutoNextEpisode"
+    static let autoSkipIntroPrefKey = "FloatVideoAutoSkipIntro"
+    private static let introEndBySlugKey = "FloatVideoIntroEndBySlug"
+    /// Conservative OP / cold-open length for VN/KR drama & anime.
+    private static let defaultIntroSeconds: Double = 90
+    private static let minEpisodeSecondsForIntroSkip: Double = 360
+
+    enum SizePreset: String, CaseIterable {
+        case mini, standard, wide, pocket
+
+        var chipTitle: String {
+            switch self {
+            case .mini: return "Nhỏ"
+            case .standard: return "Vừa"
+            case .wide: return "Rộng"
+            case .pocket: return "Lớn"
+            }
+        }
+
+        var menuTitle: String {
+            switch self {
+            case .mini: return "Cỡ Nhỏ (~340px)"
+            case .standard: return "Cỡ Vừa (~500px)"
+            case .wide: return "Cỡ Rộng (~680px)"
+            case .pocket: return "Cỡ Lớn (ô trống lớn nhất)"
+            }
+        }
+
+        /// Target width; `nil` means fit largest clear pocket.
+        var targetWidth: CGFloat? {
+            switch self {
+            case .mini: return 340
+            case .standard: return 500
+            case .wide: return 680
+            case .pocket: return nil
+            }
+        }
+    }
+
+    static var savedSizePreset: SizePreset {
+        let raw = UserDefaults.standard.string(forKey: sizePresetKey) ?? ""
+        return SizePreset(rawValue: raw) ?? .standard
+    }
+
+    static func persistSizePreset(_ preset: SizePreset) {
+        UserDefaults.standard.set(preset.rawValue, forKey: sizePresetKey)
+    }
+
+    /// Default ON when never set (series benefit from binge-watch).
+    static var preferredAutoNextEpisode: Bool {
+        if UserDefaults.standard.object(forKey: autoNextEpisodePrefKey) == nil { return true }
+        return UserDefaults.standard.bool(forKey: autoNextEpisodePrefKey)
+    }
+
+    @discardableResult
+    static func setPreferredAutoNextEpisode(_ enabled: Bool) -> Bool {
+        UserDefaults.standard.set(enabled, forKey: autoNextEpisodePrefKey)
+        return enabled
+    }
+
+    static var preferredAutoSkipIntro: Bool {
+        if UserDefaults.standard.object(forKey: autoSkipIntroPrefKey) == nil { return true }
+        return UserDefaults.standard.bool(forKey: autoSkipIntroPrefKey)
+    }
+
+    @discardableResult
+    static func setPreferredAutoSkipIntro(_ enabled: Bool) -> Bool {
+        UserDefaults.standard.set(enabled, forKey: autoSkipIntroPrefKey)
+        return enabled
+    }
+
+    private static func rememberedIntroEnd(forSlug slug: String) -> Double? {
+        guard !slug.isEmpty,
+              let dict = UserDefaults.standard.dictionary(forKey: introEndBySlugKey) as? [String: Double],
+              let value = dict[slug], value > 10 else { return nil }
+        return value
+    }
+
+    private static func rememberIntroEnd(_ seconds: Double, forSlug slug: String) {
+        guard !slug.isEmpty, seconds > 10 else { return }
+        var dict = (UserDefaults.standard.dictionary(forKey: introEndBySlugKey) as? [String: Double]) ?? [:]
+        dict[slug] = seconds
+        UserDefaults.standard.set(dict, forKey: introEndBySlugKey)
+    }
+
+    /// Preferred click-through state. Defaults ON when never set.
+    /// Used by status/toggle even when no float window is open yet.
+    static var preferredGhostMode: Bool {
+        if UserDefaults.standard.object(forKey: ghostPrefKey) == nil { return true }
+        return UserDefaults.standard.bool(forKey: ghostPrefKey)
+    }
+
+    @discardableResult
+    static func setPreferredGhostMode(_ enabled: Bool) -> Bool {
+        UserDefaults.standard.set(enabled, forKey: ghostPrefKey)
+        return enabled
+    }
+
+    @discardableResult
+    static func togglePreferredGhostMode() -> Bool {
+        setPreferredGhostMode(!preferredGhostMode)
+    }
 
     var onClose: (() -> Void)?
 
-    // For hover show/hide control bar (cursor-position polling)
+    func applyMovieContext(_ context: MovieContext?) {
+        movieContext = context
+        if let ep = context?.currentEpisode {
+            videoTitle = context?.name.isEmpty == false
+                ? "\(context!.name) — \(ep.name)"
+                : ep.name
+            titleLabel?.stringValue = videoTitle
+        }
+        resetEpisodeWatchAssistState()
+        updateEpisodeButtons()
+        refreshWatchAssistButtonStyles()
+        layoutControlBar()
+    }
+
+    // For hover show/hide chrome (title + external control strip)
     private var isHovering = false
     private var hideTimer: DispatchWorkItem?
     private var cursorPollTimer: Timer?
     private var cursorWasInside = false
+    /// Idle delay before PiP chrome auto-hides when the cursor leaves the player/strip.
+    private static let chromeHideDelay: TimeInterval = 2.5
 
     // For window resize dragging
     private var initialMouseLocation: NSPoint = .zero
@@ -102,7 +603,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     // For window resizing
     private var isResizing = false
     private var resizeEdge: ResizeEdge = .none
-    private let resizeBorderWidth: CGFloat = 12
+    private let resizeBorderWidth: CGFloat = 16
 
     enum ResizeEdge {
         case none
@@ -151,10 +652,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         NotificationCenter.default.addObserver(forName: NSWindow.didMoveNotification,
             object: self, queue: .main) { [weak self] _ in
             self?.saveWindowFrame()
+            self?.syncControlStrip(animated: false)
         }
         NotificationCenter.default.addObserver(forName: NSWindow.didResizeNotification,
             object: self, queue: .main) { [weak self] _ in
             self?.scheduleInjectedLayoutRefresh()
+            self?.layoutVideoChrome()
         }
 
         // Key setting 3: Floating panel properties
@@ -166,8 +669,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         self.backgroundColor = .clear
 
         // Window size constraints (based on video aspect ratio, prevent minSize from breaking locked aspect ratio)
-        let minW: CGFloat = 200
-        let maxW: CGFloat = 1920
+        let minW: CGFloat = (videoAspectRatio < 1.0) ? 220 : 200
+        let maxW: CGFloat = (videoAspectRatio < 1.0) ? 540 : 1920
         self.minSize = NSSize(width: minW, height: minW / videoAspectRatio)
         self.maxSize = NSSize(width: maxW, height: maxW / videoAspectRatio)
     }
@@ -189,45 +692,65 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             width: width, height: titleBarHeight
         ))
         titleBarView.wantsLayer = true
-        titleBarView.layer?.backgroundColor = NSColor(white: 0.12, alpha: 0.95).cgColor
+        titleBarView.layer?.backgroundColor = NSColor(white: 0.1, alpha: 0.92).cgColor
         titleBarView.autoresizingMask = [.width, .minYMargin]
 
-        // Close button
+        let titleEffect = NSVisualEffectView(frame: titleBarView.bounds)
+        titleEffect.autoresizingMask = [.width, .height]
+        titleEffect.material = .hudWindow
+        titleEffect.blendingMode = .withinWindow
+        titleEffect.state = .active
+        titleBarView.addSubview(titleEffect, positioned: .below, relativeTo: nil)
+
+        // Close button (red)
         let closeBtn = createCircleButton(
-            frame: NSRect(x: 10, y: 7, width: 16, height: 16),
+            frame: NSRect(x: 10, y: 8, width: 14, height: 14),
             color: NSColor(red: 1.0, green: 0.38, blue: 0.35, alpha: 1.0),
             action: #selector(closeWindow)
         )
         titleBarView.addSubview(closeBtn)
 
-        // Opacity button
+        // Opacity button (yellow)
         let miniBtn = createCircleButton(
-            frame: NSRect(x: 32, y: 7, width: 16, height: 16),
+            frame: NSRect(x: 30, y: 8, width: 14, height: 14),
             color: NSColor(red: 1.0, green: 0.82, blue: 0.28, alpha: 1.0),
             action: #selector(toggleOpacity)
         )
         titleBarView.addSubview(miniBtn)
 
-        // Always-on-top indicator
-        let pinBtn = createCircleButton(
-            frame: NSRect(x: 54, y: 7, width: 16, height: 16),
+        // Pin (green) — locks position and pauses auto-dock
+        let zoomBtn = createCircleButton(
+            frame: NSRect(x: 50, y: 8, width: 14, height: 14),
             color: NSColor(red: 0.27, green: 0.85, blue: 0.46, alpha: 1.0),
-            action: nil
+            action: #selector(togglePin)
         )
-        titleBarView.addSubview(pinBtn)
+        zoomBtn.toolTip = "Ghim vị trí — không tự né cửa sổ code"
+        pinButton = zoomBtn as? NSButton
+        titleBarView.addSubview(zoomBtn)
+
+        // Ghost Mode button (purple / click-through)
+        let ghostBtn = createCircleButton(
+            frame: NSRect(x: 70, y: 8, width: 14, height: 14),
+            color: NSColor(red: 0.68, green: 0.45, blue: 0.98, alpha: 1.0),
+            action: #selector(toggleGhostMode)
+        )
+        ghostBtn.toolTip = "Xuyên chuột — bấm xuyên phim để gõ code. Thanh điều khiển vẫn bấm được."
+        titleBarView.addSubview(ghostBtn)
+        closeBtn.toolTip = "Đóng"
+        miniBtn.toolTip = "Độ mờ"
 
         // Title text
         titleLabel = NSTextField(frame: NSRect(
-            x: 78, y: 5,
-            width: width - 88, height: 20
+            x: 92, y: 5,
+            width: max(60, width - 102), height: 20
         ))
         titleLabel.stringValue = videoTitle
         titleLabel.isEditable = false
         titleLabel.isBordered = false
         titleLabel.drawsBackground = false
         titleLabel.backgroundColor = .clear
-        titleLabel.textColor = NSColor(white: 0.85, alpha: 1.0)
-        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .medium)
+        titleLabel.textColor = NSColor(white: 0.92, alpha: 1.0)
+        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingTail
         titleLabel.autoresizingMask = [.width]
         titleBarView.addSubview(titleLabel)
@@ -238,13 +761,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
         let webFrame = NSRect(x: 0, y: 0, width: width, height: height)
         webView = WKWebView(frame: webFrame, configuration: webConfig)
-        webView.autoresizingMask = [.width, .height]
+        webView.autoresizingMask = []
         webView.setValue(false, forKey: "drawsBackground")
         webView.navigationDelegate = self
+        webView.uiDelegate = self
 
         // Use native Safari User-Agent to avoid JS engine fingerprint mismatch triggering YouTube's "fake browser" bot detection
         webView.customUserAgent = "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) AppleWebKit/605.1.15 (KHTML, like Gecko) Version/17.3 Safari/605.1.15"
-
 
         container.addSubview(webView)
 
@@ -291,55 +814,65 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         // Title bar (overlays on top of webView and overlay, shown on hover)
         container.addSubview(titleBarView)
 
-        // Bottom control bar (shown on hover, YouTube-style)
-        let barH: CGFloat = 44
+        // Bottom control bar (shown on hover, modern Apple PiP style)
+        let barH: CGFloat = 58
         controlBarView = NSView(frame: NSRect(x: 0, y: 0, width: width, height: barH))
         controlBarView.wantsLayer = true
-        controlBarView.layer?.backgroundColor = NSColor(white: 0.1, alpha: 0.85).cgColor
+        controlBarView.layer?.backgroundColor = NSColor(white: 0.08, alpha: 0.90).cgColor
+        controlBarView.layer?.borderColor = NSColor(white: 1.0, alpha: 0.12).cgColor
+        controlBarView.layer?.borderWidth = 0.5
         controlBarView.autoresizingMask = [.width, .maxYMargin]
         controlBarView.alphaValue = 0
 
-        // -- Progress bar (top, full-width 4px)
-        progressBg = NSView(frame: NSRect(x: 0, y: barH - 4, width: width, height: 4))
-        progressBg.wantsLayer = true
-        progressBg.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.15).cgColor
-        progressBg.autoresizingMask = [.width]
-        controlBarView.addSubview(progressBg)
+        let controlEffect = NSVisualEffectView(frame: controlBarView.bounds)
+        controlEffect.autoresizingMask = [.width, .height]
+        controlEffect.material = .hudWindow
+        controlEffect.blendingMode = .withinWindow
+        controlEffect.state = .active
+        controlBarView.addSubview(controlEffect, positioned: .below, relativeTo: nil)
 
-        progressPlayed = NSView(frame: NSRect(x: 0, y: barH - 4, width: 0, height: 4))
-        progressPlayed.wantsLayer = true
-        progressPlayed.layer?.backgroundColor = NSColor(red: 1.0, green: 0.0, blue: 0.0, alpha: 1.0).cgColor
-        controlBarView.addSubview(progressPlayed)
+        // Modern Scrubber (timeline track + knob)
+        scrubberView = ModernScrubberView(frame: NSRect(x: 14, y: barH - 18, width: max(50, width - 28), height: 16))
+        scrubberView.onSeek = { [weak self] percent in
+            self?.userSeekedThisEpisode = true
+            self?.seekTo(percent: percent)
+        }
+        controlBarView.addSubview(scrubberView)
 
-        // Progress bar click area (larger hit target)
-        let progressHit = ProgressClickView(frame: NSRect(x: 0, y: barH - 12, width: width, height: 12))
-        progressHit.autoresizingMask = [.width]
-        progressHit.onSeek = { [weak self] percent in self?.seekTo(percent: percent) }
-        controlBarView.addSubview(progressHit)
+        // Rewind 10s
+        let rewBtn = makeControlButton(symbolName: "gobackward.10", action: #selector(skipBackward))
+        self.rewindButton = rewBtn
+        controlBarView.addSubview(rewBtn)
 
-        // -- Control button row (y=0 to barH-4)
-        var x: CGFloat = 8
-
-        // Play/Pause
-        let ppBtn = makeControlButton(x: x, symbolName: "pause.fill", action: #selector(togglePlayPause))
+        // Play/Pause (prominent primary circular button)
+        let ppBtn = makePrimaryPlayButton(action: #selector(togglePlayPause))
         self.playPauseButton = ppBtn
         controlBarView.addSubview(ppBtn)
-        x += 32
 
-        // Skip 10s
-        let skipBtn = makeControlButton(x: x, symbolName: "goforward.10", action: #selector(skipForward))
-        self.skipButton = skipBtn
-        controlBarView.addSubview(skipBtn)
-        x += 32
+        let prevEpBtn = makeControlButton(symbolName: "backward.end.fill", action: #selector(prevEpisode), pointSize: 11)
+        prevEpBtn.toolTip = "Tập trước (⌃⌥[)"
+        prevEpBtn.isHidden = true
+        controlBarView.addSubview(prevEpBtn)
+        stripPrevEpisodeButton = prevEpBtn
 
-        // Volume
-        let volBtn = makeControlButton(x: x, symbolName: "speaker.wave.2.fill", action: #selector(toggleMute))
+        let nextEpBtn = makeControlButton(symbolName: "forward.end.fill", action: #selector(nextEpisode), pointSize: 11)
+        nextEpBtn.toolTip = "Tập sau (⌃⌥])"
+        nextEpBtn.isHidden = true
+        controlBarView.addSubview(nextEpBtn)
+        stripNextEpisodeButton = nextEpBtn
+
+        // Skip forward 10s
+        let fwdBtn = makeControlButton(symbolName: "goforward.10", action: #selector(skipForward))
+        self.skipButton = fwdBtn
+        controlBarView.addSubview(fwdBtn)
+
+        // Volume Mute toggle
+        let volBtn = makeControlButton(symbolName: "speaker.wave.2.fill", action: #selector(toggleMute))
         self.volumeButton = volBtn
         controlBarView.addSubview(volBtn)
-        x += 28
 
         // Volume slider
-        let slider = NSSlider(frame: NSRect(x: x, y: 10, width: 60, height: 20))
+        let slider = NSSlider(frame: NSRect(x: 0, y: 11, width: 48, height: 20))
         slider.minValue = 0
         slider.maxValue = 1
         slider.doubleValue = 1
@@ -349,39 +882,147 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         slider.controlSize = .small
         controlBarView.addSubview(slider)
         self.volumeSlider = slider
-        x += 64
 
-        // Time label (right-aligned)
-        let tLabel = NSTextField(frame: NSRect(x: width - 100, y: 8, width: 92, height: 20))
-        tLabel.stringValue = "0:00 / 0:00"
+        // Speed badge / button (1.0x -> 1.25x -> 1.5x -> 2.0x -> 0.75x)
+        let sBtn = NSButton(frame: NSRect(x: 0, y: 10, width: 38, height: 22))
+        sBtn.bezelStyle = .inline
+        sBtn.isBordered = false
+        sBtn.wantsLayer = true
+        sBtn.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.12).cgColor
+        sBtn.layer?.cornerRadius = 6
+        sBtn.title = "1.0x"
+        sBtn.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .semibold)
+        sBtn.contentTintColor = NSColor(white: 0.95, alpha: 1.0)
+        sBtn.target = self
+        sBtn.action = #selector(cyclePlaybackRate)
+        controlBarView.addSubview(sBtn)
+        self.speedButton = sBtn
+
+        // Maximize / Restore button
+        let maxBtn = makeControlButton(symbolName: "arrow.up.left.and.arrow.down.right", action: #selector(toggleMaximize))
+        controlBarView.addSubview(maxBtn)
+        self.maximizeButton = maxBtn
+
+        let smallerBtn = makeControlButton(symbolName: "minus.magnifyingglass", action: #selector(shrinkWindow))
+        smallerBtn.toolTip = "Thu nhỏ cửa sổ (⌃⌥-)"
+        controlBarView.addSubview(smallerBtn)
+        sizeDownButton = smallerBtn
+
+        let largerBtn = makeControlButton(symbolName: "plus.magnifyingglass", action: #selector(growWindow))
+        largerBtn.toolTip = "Phóng to cửa sổ (⌃⌥=)"
+        controlBarView.addSubview(largerBtn)
+        sizeUpButton = largerBtn
+
+        // Time label
+        let tLabel = NSTextField(frame: NSRect(x: 0, y: 9, width: 90, height: 20))
+        tLabel.stringValue = "--:--"
         tLabel.isEditable = false
         tLabel.isBordered = false
         tLabel.drawsBackground = false
-        tLabel.textColor = NSColor(white: 0.9, alpha: 1.0)
-        tLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 11, weight: .regular)
+        tLabel.textColor = NSColor(white: 0.92, alpha: 1.0)
+        tLabel.font = NSFont.monospacedDigitSystemFont(ofSize: 10.5, weight: .medium)
         tLabel.alignment = .right
         tLabel.lineBreakMode = .byClipping
-        tLabel.autoresizingMask = [.minXMargin]
         self.timeLabel = tLabel
         controlBarView.addSubview(tLabel)
 
-        container.addSubview(controlBarView)
+        let presetMini = makeSizePresetChip(.mini)
+        controlBarView.addSubview(presetMini)
+        sizePresetMiniButton = presetMini
+        let presetStandard = makeSizePresetChip(.standard)
+        controlBarView.addSubview(presetStandard)
+        sizePresetStandardButton = presetStandard
+        let presetWide = makeSizePresetChip(.wide)
+        controlBarView.addSubview(presetWide)
+        sizePresetWideButton = presetWide
+        selectedSizePreset = Self.savedSizePreset
+        refreshSizePresetChipStyles()
+
+        let closeOnStrip = makeControlButton(symbolName: "xmark", action: #selector(closeWindow))
+        closeOnStrip.toolTip = "Đóng"
+        controlBarView.addSubview(closeOnStrip)
+        stripCloseButton = closeOnStrip
+
+        let ghostOnStrip = makeControlButton(symbolName: "eye", action: #selector(toggleGhostMode))
+        ghostOnStrip.toolTip = "Xuyên chuột — bấm xuyên phim để gõ code. Thanh này vẫn dùng được (⌘⇧G)"
+        controlBarView.addSubview(ghostOnStrip)
+        stripGhostButton = ghostOnStrip
+
+        let duckOnStrip = makeControlButton(symbolName: "speaker.wave.1.fill", action: #selector(toggleDuck))
+        duckOnStrip.toolTip = "Hạ tiếng khi AI đang nói (⌘⇧D)"
+        controlBarView.addSubview(duckOnStrip)
+        stripDuckButton = duckOnStrip
+
+        let autoNextBtn = makeControlButton(symbolName: "forward.end.alt.fill", action: #selector(toggleAutoNextEpisode), pointSize: 11)
+        autoNextBtn.toolTip = "Tự động chuyển tập khi hết tập"
+        controlBarView.addSubview(autoNextBtn)
+        stripAutoNextButton = autoNextBtn
+
+        let skipIntroBtn = makeControlButton(symbolName: "forward.fill", action: #selector(manualSkipIntro), pointSize: 11)
+        skipIntroBtn.toolTip = "Bỏ qua giới thiệu (~90s) — giữ ⌥ để bật/tắt tự động"
+        controlBarView.addSubview(skipIntroBtn)
+        stripSkipIntroButton = skipIntroBtn
+
+        let moreOnStrip = makeControlButton(symbolName: "ellipsis", action: #selector(showOverflowMenu))
+        moreOnStrip.toolTip = "Thêm điều khiển"
+        moreOnStrip.isHidden = true
+        controlBarView.addSubview(moreOnStrip)
+        stripMoreButton = moreOnStrip
+
+        // Edge resize grips — visual only; clicks handled by ControlStripPanel.sendEvent.
+        let leftGrip = makeStripResizeGrip(isLeft: true)
+        controlBarView.addSubview(leftGrip, positioned: .below, relativeTo: playPauseButton)
+        stripLeftGrip = leftGrip
+        let rightGrip = makeStripResizeGrip(isLeft: false)
+        controlBarView.addSubview(rightGrip, positioned: .below, relativeTo: stripCloseButton)
+        stripRightGrip = rightGrip
+
+        playPauseButton?.toolTip = "Phát / dừng (⌘⇧Space hoặc nút tai nghe)"
+        rewindButton?.toolTip = "Tua -10 giây"
+        skipButton?.toolTip = "Tua +10 giây"
+        maximizeButton?.toolTip = "Phóng to tối đa / khôi phục"
+        refreshWatchAssistButtonStyles()
+
+        container.addSubview(controlBarView, positioned: .above, relativeTo: webView)
+        layoutVideoChrome()
+
+        // Brief 1-line HUD for duck / coding-safe / hotkey fail
+        let hud = NSTextField(frame: NSRect(x: 12, y: height / 2 - 14, width: width - 24, height: 28))
+        hud.isEditable = false
+        hud.isBordered = false
+        hud.isBezeled = false
+        hud.drawsBackground = true
+        hud.backgroundColor = NSColor(white: 0.08, alpha: 0.82)
+        hud.textColor = NSColor(white: 0.95, alpha: 1)
+        hud.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
+        hud.alignment = .center
+        hud.alphaValue = 0
+        hud.isHidden = true
+        hud.wantsLayer = true
+        hud.layer?.cornerRadius = 8
+        hud.layer?.masksToBounds = true
+        hud.autoresizingMask = [.width, .minYMargin, .maxYMargin]
+        container.addSubview(hud, positioned: .above, relativeTo: controlBarView)
+        hudLabel = hud
 
         // Hide title bar by default (PiP-style: shown on hover)
         titleBarView.alphaValue = 0
 
-        // Add resize indicator (bottom-right corner)
+        // Corner resize grip — visible while hovering so size changes are discoverable
         let resizeIndicator = NSTextField(frame: NSRect(
-            x: width - 20, y: 0, width: 16, height: 16
+            x: width - 22, y: 4, width: 18, height: 16
         ))
         resizeIndicator.stringValue = "⟋"
         resizeIndicator.isEditable = false
         resizeIndicator.isBordered = false
         resizeIndicator.drawsBackground = false
-        resizeIndicator.textColor = NSColor(white: 0.5, alpha: 0.6)
-        resizeIndicator.font = NSFont.systemFont(ofSize: 12)
+        resizeIndicator.textColor = NSColor(white: 0.85, alpha: 0.75)
+        resizeIndicator.font = NSFont.systemFont(ofSize: 13, weight: .semibold)
         resizeIndicator.autoresizingMask = [.minXMargin, .maxYMargin]
+        resizeIndicator.alphaValue = 0
+        resizeIndicator.isHidden = false
         container.addSubview(resizeIndicator)
+        self.resizeIndicator = resizeIndicator
 
         self.contentView = container
 
@@ -415,24 +1056,40 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     // MARK: - Window Positioning
 
     private func positionWindow() {
-        // Try to restore the last saved window position and size
+        // Restore last size; placement vs code windows happens in show()/placeAwayFromCode().
         if let dict = UserDefaults.standard.dictionary(forKey: Self.frameKey),
-           let x = dict["x"] as? CGFloat, let y = dict["y"] as? CGFloat,
            let w = dict["w"] as? CGFloat, dict["h"] is CGFloat {
             let restoredW = max(w, self.minSize.width)
-            let savedFrame = NSRect(x: x, y: y, width: restoredW, height: restoredW / videoAspectRatio)
-            // Ensure the saved position is still on a visible screen
-            if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(savedFrame) }) {
-                self.setFrame(savedFrame, display: false)
-                return
+            let savedH = restoredW / videoAspectRatio
+            if let x = dict["x"] as? CGFloat, let y = dict["y"] as? CGFloat {
+                let savedFrame = NSRect(x: x, y: y, width: restoredW, height: savedH)
+                if NSScreen.screens.contains(where: { $0.visibleFrame.intersects(savedFrame) }) {
+                    self.setFrame(savedFrame, display: false)
+                    return
+                }
             }
+            // Size only — park top-right until placer runs.
+            guard let screen = NSScreen.main else { return }
+            let screenFrame = screen.visibleFrame
+            let frame = NSRect(
+                x: screenFrame.maxX - restoredW - 20,
+                y: screenFrame.maxY - savedH - 20,
+                width: restoredW,
+                height: savedH
+            )
+            self.setFrame(frame, display: false)
+            return
         }
-        // Default position: bottom-right corner of the screen
         guard let screen = NSScreen.main else { return }
         let screenFrame = screen.visibleFrame
-        let x = screenFrame.maxX - self.frame.width - 24
-        let y = screenFrame.minY + 24
+        let x = screenFrame.maxX - self.frame.width - 20
+        let y = screenFrame.maxY - self.frame.height - 20
         self.setFrameOrigin(NSPoint(x: x, y: y))
+    }
+
+    /// Prefer a clear pocket away from coding/input; fall back to coding-safe mode.
+    func placeAwayFromCode() {
+        vibeDock.placeImmediately(self)
     }
 
     private func saveWindowFrame() {
@@ -518,12 +1175,21 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             }
         }
 
-        // Priority 3: Embed URL -- wrap in iframe (non-YouTube sites)
-        if let embedUrl = embedUrl, !embedUrl.isEmpty {
+        // Priority 3: Embed URL -- load directly in WKWebView with Referer
+        if let embedUrl = embedUrl, !embedUrl.isEmpty, let targetURL = URL(string: embedUrl) {
             self.loadingStrategy = .siteEmbed
-            let html = buildEmbedHTML(embedUrl: embedUrl)
-            webView.loadHTMLString(html, baseURL: nil)
-            NSLog("[FloatVideo] Loading embed via iframe: \(embedUrl)")
+            self.currentEmbedUrl = embedUrl
+            self.hasTriedIframeEmbedFallback = false
+            var request = URLRequest(url: targetURL)
+            if !url.isEmpty, let _ = URL(string: url) {
+                request.setValue(url, forHTTPHeaderField: "Referer")
+            } else if embedUrl.contains("streamc.xyz") {
+                request.setValue("https://phim.nguonc.com/", forHTTPHeaderField: "Referer")
+            } else if embedUrl.contains("tiktok.com") {
+                request.setValue("https://www.tiktok.com/", forHTTPHeaderField: "Referer")
+            }
+            webView.load(request)
+            NSLog("[FloatVideo] Loading embed directly: \(embedUrl)")
             return
         }
 
@@ -858,8 +1524,14 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                     self.hideLoadingOverlay()
                 }
             }
+        } else if loadingStrategy == .siteEmbed {
+            // Site embed: inject player automation, auto-play triggers, and hide overlay
+            injectEmbedPlayerAutomation()
+            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+                self?.hideLoadingOverlay()
+            }
         } else {
-            // Other strategies (direct video, YouTube embed, site embed) have built-in autoplay, remove overlay directly
+            // Other strategies (direct video, YouTube embed) have built-in autoplay, remove overlay directly
             hideLoadingOverlay()
         }
     }
@@ -870,6 +1542,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFail") {
             return
         }
+        if loadingStrategy == .siteEmbed && !hasTriedIframeEmbedFallback, let embedUrl = currentEmbedUrl {
+            hasTriedIframeEmbedFallback = true
+            let html = buildEmbedHTML(embedUrl: embedUrl)
+            webView.loadHTMLString(html, baseURL: nil)
+            NSLog("[FloatVideo] Direct embed failed, falling back to iframe embed: \(embedUrl)")
+            return
+        }
         hideLoadingOverlay()
     }
 
@@ -877,6 +1556,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         NSLog("[FloatVideo] Provisional page load failed: \(error)")
         refreshYouTubeEmbedFallbackURLIfNeeded()
         if shouldUseYouTubeFullPagePrimary() && startYouTubeEmbedFallback(reason: "didFailProvisional") {
+            return
+        }
+        if loadingStrategy == .siteEmbed && !hasTriedIframeEmbedFallback, let embedUrl = currentEmbedUrl {
+            hasTriedIframeEmbedFallback = true
+            let html = buildEmbedHTML(embedUrl: embedUrl)
+            webView.loadHTMLString(html, baseURL: nil)
+            NSLog("[FloatVideo] Direct embed provisional failed, falling back to iframe embed: \(embedUrl)")
             return
         }
         hideLoadingOverlay()
@@ -889,25 +1575,69 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; }
-            html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { width: 100vw; height: 100vh; background: #000; overflow: hidden; }
             video {
                 position: fixed; top: 0; left: 0;
                 width: 100vw; height: 100vh;
-                object-fit: cover;
+                object-fit: contain;
                 background: #000;
+                cursor: pointer;
             }
         </style>
+        <script src="https://cdn.jsdelivr.net/npm/hls.js@latest"></script>
         </head><body>
-        <video src="\(videoSrc)" autoplay controls playsinline></video>
+        <video id="player" autoplay playsinline></video>
         <script>
-            const v = document.querySelector('video');
-            v.currentTime = \(currentTime);
-            v.addEventListener('dblclick', () => {
-                if (document.fullscreenElement) {
-                    document.exitFullscreen();
+            const v = document.getElementById('player');
+            const src = "\(videoSrc)";
+            const startTime = \(currentTime);
+
+            function playNative(url) {
+                v.src = url;
+                if (startTime > 0) v.currentTime = startTime;
+                v.play().catch(function() {});
+            }
+
+            if (src.indexOf('.m3u8') !== -1) {
+                if (typeof Hls !== 'undefined' && Hls.isSupported()) {
+                    try {
+                        const hls = new Hls({ enableWorker: true, lowLatencyMode: false });
+                        hls.loadSource(src);
+                        hls.attachMedia(v);
+                        hls.on(Hls.Events.MANIFEST_PARSED, function() {
+                            if (startTime > 0) v.currentTime = startTime;
+                            v.play().catch(function() {});
+                        });
+                        hls.on(Hls.Events.ERROR, function(event, data) {
+                            if (data.fatal) {
+                                console.warn('[FloatVideo] HLS.js error, falling back to native player', data);
+                                hls.destroy();
+                                playNative(src);
+                            }
+                        });
+                    } catch (e) {
+                        playNative(src);
+                    }
                 } else {
-                    v.requestFullscreen();
+                    playNative(src);
+                }
+            } else {
+                playNative(src);
+            }
+
+            v.addEventListener('click', function(e) {
+                if (e.target === v) {
+                    if (v.paused) v.play().catch(function() {});
+                    else v.pause();
+                }
+            });
+
+            v.addEventListener('dblclick', function() {
+                if (document.fullscreenElement) {
+                    document.exitFullscreen().catch(function() {});
+                } else if (v.requestFullscreen) {
+                    v.requestFullscreen().catch(function() {});
                 }
             });
         </script>
@@ -922,8 +1652,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         <meta charset="utf-8">
         <meta name="viewport" content="width=device-width, initial-scale=1.0">
         <style>
-            * { margin: 0; padding: 0; }
-            html, body { width: 100%; height: 100%; background: #000; overflow: hidden; }
+            * { margin: 0; padding: 0; box-sizing: border-box; }
+            html, body { width: 100vw; height: 100vh; background: #000; overflow: hidden; }
             iframe {
                 position: fixed; top: 0; left: 0;
                 width: 100vw; height: 100vh;
@@ -932,12 +1662,123 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         </style>
         </head><body>
         <iframe src="\(embedUrl)"
-                allow="accelerometer; autoplay; clipboard-write; encrypted-media; gyroscope; picture-in-picture; web-share"
-                referrerpolicy="strict-origin-when-cross-origin"
+                allow="accelerometer; autoplay *; clipboard-write; encrypted-media; gyroscope; picture-in-picture *; web-share; fullscreen *"
+                referrerpolicy="no-referrer"
                 allowfullscreen>
         </iframe>
         </body></html>
         """
+    }
+
+    // MARK: - WKUIDelegate
+
+    func webView(_ webView: WKWebView, createWebViewWith configuration: WKWebViewConfiguration,
+                 for navigationAction: WKNavigationAction, windowFeatures: WKWindowFeatures) -> WKWebView? {
+        // Block popups from video/embed players
+        return nil
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptAlertPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping () -> Void) {
+        completionHandler()
+    }
+
+    func webView(_ webView: WKWebView, runJavaScriptConfirmPanelWithMessage message: String,
+                 initiatedByFrame frame: WKFrameInfo, completionHandler: @escaping (Bool) -> Void) {
+        completionHandler(true)
+    }
+
+    private func injectEmbedPlayerAutomation() {
+        let js = """
+        (function() {
+            if (window.__floatVideoEmbedAutomationInstalled) return;
+            window.__floatVideoEmbedAutomationInstalled = true;
+
+            try {
+                document.documentElement.style.overflow = 'hidden';
+                document.body.style.overflow = 'hidden';
+                document.body.style.margin = '0';
+                document.body.style.padding = '0';
+                document.body.style.background = '#000';
+            } catch(e) {}
+
+            var attempts = 0;
+            var maxAttempts = 30; // 30 * 250ms = 7.5 seconds
+
+            var timer = setInterval(function() {
+                attempts++;
+
+                // 1. If JWPlayer API is ready, trigger play
+                if (window.jwplayer && typeof window.jwplayer === 'function') {
+                    try {
+                        var jw = window.jwplayer();
+                        var state = jw.getState();
+                        if (state === 'idle' || state === 'paused') {
+                            jw.play();
+                        }
+                        if (state === 'playing' || state === 'buffering') {
+                            clearInterval(timer);
+                            return;
+                        }
+                    } catch(e) {}
+                }
+
+                // 2. If <video> element exists, try playing
+                var v = document.querySelector('video');
+                if (v) {
+                    if (v.paused) {
+                        v.muted = false;
+                        v.play().catch(function() {
+                            v.muted = true;
+                            v.play().then(function() {
+                                setTimeout(function() { v.muted = false; }, 400);
+                            }).catch(function() {});
+                        });
+                    } else {
+                        clearInterval(timer);
+                        return;
+                    }
+                }
+
+                // 3. Auto-click splash play buttons / verification buttons
+                var playSelectors = [
+                    '.jw-display-icon-display',
+                    '.jw-display-icon-container',
+                    '.jw-icon-display',
+                    'button.jw-display-icon-container',
+                    '.stream-player-button',
+                    '.stream-resume-button',
+                    '#verification button:not([hidden])',
+                    '#verification-retry',
+                    '.play-button',
+                    '.vjs-big-play-button',
+                    'button[aria-label*="Play" i]',
+                    'button[aria-label*="Phát" i]',
+                    'button[title*="Play" i]',
+                    'button[title*="Phát" i]'
+                ];
+
+                for (var i = 0; i < playSelectors.length; i++) {
+                    var btn = document.querySelector(playSelectors[i]);
+                    if (btn && btn.offsetParent !== null && !btn.disabled) {
+                        try { btn.click(); } catch(e) {}
+                        break;
+                    }
+                }
+
+                // 4. Auto-skip embed ads
+                var skipBtn = document.querySelector('.jw-skip, .skip-ad, .video-ad-skip');
+                if (skipBtn && skipBtn.offsetParent !== null) {
+                    try { skipBtn.click(); } catch(e) {}
+                }
+
+                if (attempts >= maxAttempts) {
+                    clearInterval(timer);
+                }
+            }, 250);
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     private func injectVideoMaximize(site: String, currentTime: Double) {
@@ -1018,11 +1859,72 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                     }
                 ` : '';
 
+                const isTikTok = site === 'tiktok';
+                const tiktokCss = isTikTok ? `
+                    html, body {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        overflow-x: hidden !important;
+                        overflow-y: scroll !important;
+                        scroll-snap-type: y mandatory !important;
+                        background: #000 !important;
+                        width: 100vw !important;
+                        height: 100vh !important;
+                    }
+                    header, [data-e2e="nav-bar"], [data-e2e="side-nav"],
+                    [data-e2e="bottom-app-banner"], div[class*="DivBottomBanner"],
+                    div[class*="DivModalContainer"], div[class*="DivLoginModal"],
+                    div[class*="DivSideNavContainer"], div[class*="DivFloatingCard"],
+                    div[class*="DivActionItemContainer"], div[class*="DivShareAction"],
+                    button[class*="ButtonAppStore"], [data-e2e="user-follow-button"] {
+                        display: none !important;
+                        visibility: hidden !important;
+                        opacity: 0 !important;
+                    }
+                    #app, div[class*="DivBodyContainer"], div[class*="DivContentContainer"],
+                    div[class*="DivFeedList"], div[class*="DivBrowserModeContainer"],
+                    div[class*="DivMainContainer"], main {
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        width: 100vw !important;
+                        max-width: 100vw !important;
+                        background: #000 !important;
+                    }
+                    div[data-e2e="recommend-list-item-container"],
+                    div[class*="DivVideoCardContainer"],
+                    div[class*="DivItemContainer"] {
+                        width: 100vw !important;
+                        height: 100vh !important;
+                        max-width: 100vw !important;
+                        margin: 0 !important;
+                        padding: 0 !important;
+                        scroll-snap-align: start !important;
+                        display: flex !important;
+                        justify-content: center !important;
+                        align-items: center !important;
+                        background: #000 !important;
+                    }
+                    div[data-e2e="recommend-list-item-container"] video,
+                    div[class*="DivVideoCardContainer"] video,
+                    div[class*="DivItemContainer"] video {
+                        width: 100% !important;
+                        height: 100% !important;
+                        max-width: 100vw !important;
+                        max-height: 100vh !important;
+                        object-fit: contain !important;
+                        background: #000 !important;
+                    }
+                ` : '';
+
+                const baseHtmlOverflow = isTikTok
+                    ? 'overflow-x: hidden !important; overflow-y: scroll !important;'
+                    : 'overflow: hidden !important;';
+
                 styleEl.textContent = `
                     html, body {
                         margin: 0 !important;
                         padding: 0 !important;
-                        overflow: hidden !important;
+                        ${baseHtmlOverflow}
                         background: #000 !important;
                         width: 100% !important;
                         height: 100% !important;
@@ -1066,6 +1968,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                         z-index: 2147483647 !important;
                     }
                     ${youtubeCss}
+                    ${tiktokCss}
                 `;
             }
 
@@ -1102,6 +2005,51 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
             function applyLayout() {
                 if (window.__floatVideoApplyingLayout) return false;
+
+                if (site === 'tiktok') {
+                    window.__floatVideoApplyingLayout = true;
+                    try {
+                        ensureFloatVideoStyle();
+
+                        const handleTikTokMedia = () => {
+                            document.querySelectorAll('video').forEach(v => {
+                                if (v.muted) v.muted = false;
+                                v.volume = 1.0;
+                                v.setAttribute('playsinline', '');
+                            });
+                            const closeBtn = document.querySelector('[data-e2e="modal-close-inner-button"], [aria-label="Close"], button[class*="ButtonClose"], [data-e2e="login-modal"] button');
+                            if (closeBtn) try { closeBtn.click(); } catch(e) {}
+                        };
+                        handleTikTokMedia();
+
+                        if (!window.__tiktokTimer) {
+                            window.__tiktokTimer = setInterval(handleTikTokMedia, 1000);
+                        }
+
+                        if (!window.__tiktokNavInstalled) {
+                            window.__tiktokNavInstalled = true;
+                            window.addEventListener('keydown', (e) => {
+                                if (e.key === 'ArrowDown' || e.key === 'j' || e.key === 'PageDown') {
+                                    e.preventDefault();
+                                    window.scrollBy({ top: window.innerHeight, behavior: 'smooth' });
+                                } else if (e.key === 'ArrowUp' || e.key === 'k' || e.key === 'PageUp') {
+                                    e.preventDefault();
+                                    window.scrollBy({ top: -window.innerHeight, behavior: 'smooth' });
+                                }
+                            });
+                        }
+
+                        const currentVid = findMainVideo();
+                        if (currentVid) {
+                            currentVid.play().catch(() => {});
+                            window.__floatVideoMainVideo = currentVid;
+                        }
+                        return true;
+                    } finally {
+                        window.__floatVideoApplyingLayout = false;
+                    }
+                }
+
                 const mainVideo = findMainVideo();
                 if (!mainVideo) return false;
                 window.__floatVideoApplyingLayout = true;
@@ -1481,16 +2429,79 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     // MARK: - Window Actions
 
     func show() {
-        // Show title bar during loading (user can see title and close button)
         titleBarView.alphaValue = 1.0
+        // Restore vibe-coding prefs before first paint.
+        applyPreferredGhostOnOpen()
+        mountControlStrip()
+        placeAwayFromCode()
+        // Apply last vibe size preset when reasonable (not already near that width).
+        let preset = Self.savedSizePreset
+        selectedSizePreset = preset
+        refreshSizePresetChipStyles()
+        if preset != .pocket, let target = preset.targetWidth, abs(frame.width - target) > 48 {
+            applySizePreset(preset)
+        }
+        ensureVisibleOnScreen()
+        syncControlStrip(animated: false)
+        refreshWatchAssistButtonStyles()
+        // Never activate or become key — the IDE must keep the keyboard.
         self.orderFrontRegardless()
-        self.makeKeyAndOrderFront(nil)
-        // Start cursor-position polling for reliable auto-hide (event-based
-        // approaches fail on non-activating panels and under WKWebView).
+        showControls()
+        scheduleHideControls(after: Self.chromeHideDelay)
+        // Force another front pass after AppKit settles collection/space membership.
+        DispatchQueue.main.async { [weak self] in
+            guard let self = self else { return }
+            self.ensureVisibleOnScreen()
+            self.orderFrontRegardless()
+            if self.isHovering {
+                self.setStripChromeVisible(true, animated: false)
+            }
+            NSLog("[FloatVideo] Window shown frame=\(NSStringFromRect(self.frame)) alpha=\(self.alphaValue) ghost=\(self.isGhostMode) screen=\(self.screen?.localizedName ?? "nil")")
+        }
+        vibeDock.attach(self)
+        VibeNowPlaying.install(target: self)
         startCursorPolling()
-        // Safety: hide loading overlay after 8s regardless
         DispatchQueue.main.asyncAfter(deadline: .now() + 8.0) { [weak self] in
             self?.hideLoadingOverlay()
+        }
+    }
+
+    /// Keep the player on a real visible display — never leave it off-screen after dock/restore.
+    func ensureVisibleOnScreen() {
+        let screens = NSScreen.screens
+        guard !screens.isEmpty else { return }
+
+        let pad: CGFloat = 8
+        var frame = self.frame
+        if frame.width < minSize.width || frame.height < 80 || frame.width.isNaN || frame.height.isNaN {
+            let w = max(minSize.width, 420)
+            frame.size = NSSize(width: w, height: w / max(videoAspectRatio, 0.2))
+        }
+
+        let intersects = screens.contains { $0.visibleFrame.intersects(frame.insetBy(dx: 24, dy: 24)) }
+        let screen = (intersects ? (self.screen ?? NSScreen.main) : nil) ?? NSScreen.main ?? screens[0]
+        let vis = screen.visibleFrame
+
+        if frame.width > vis.width - pad * 2 {
+            frame.size.width = max(minSize.width, vis.width - pad * 2)
+            frame.size.height = frame.size.width / max(videoAspectRatio, 0.2)
+        }
+        if frame.height > vis.height - VibePlacer.stripHeight - pad * 2 {
+            frame.size.height = max(minSize.height, vis.height - VibePlacer.stripHeight - pad * 2)
+            frame.size.width = frame.size.height * max(videoAspectRatio, 0.2)
+        }
+
+        frame.origin.x = min(max(frame.origin.x, vis.minX + pad), vis.maxX - frame.width - pad)
+        frame.origin.y = min(max(frame.origin.y, vis.minY + pad + VibePlacer.stripHeight), vis.maxY - frame.height - pad)
+
+        if frame != self.frame {
+            setFrame(frame, display: true)
+            syncControlStrip(animated: false)
+        }
+
+        // Never open invisibly soft — coding-safe soft opacity still stays readable.
+        if alphaValue < 0.45 {
+            alphaValue = 0.72
         }
     }
 
@@ -1502,26 +2513,81 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     private func pollCursorPosition() {
-        let cursor = NSEvent.mouseLocation
-        let inside = self.frame.contains(cursor)
+        let hoveringChrome = isPointerOverChrome()
 
-        if isResizing {
-            // Keep controls visible during resize; no hide scheduling.
-            if !isHovering { showControls() }
-            hideTimer?.cancel()
-            hideTimer = nil
-            cursorWasInside = inside
+        if isResizing || isInteractingWithChrome {
+            // Keep chrome visible during resize / scrubber drag; freeze hide.
+            keepChromeVisibleForInteraction()
+            cursorWasInside = true
             return
         }
 
-        if inside && !cursorWasInside {
+        if hoveringChrome {
             cursorWasInside = true
             hideTimer?.cancel()
             hideTimer = nil
-            if !isHovering { showControls() }
-        } else if !inside && cursorWasInside {
+            if !isHovering {
+                showControls()
+            } else {
+                // Strip shown: never leave ignoresMouseEvents=true under the cursor.
+                ensureStripAcceptsMouseWhileVisible()
+            }
+        } else if cursorWasInside {
             cursorWasInside = false
-            if isHovering { scheduleHideControls() }
+            if isHovering { scheduleHideControls(after: Self.chromeHideDelay) }
+        }
+    }
+
+    /// True while the user is actively using strip controls (scrubber, etc.).
+    private var isInteractingWithChrome: Bool {
+        scrubberView?.isDragging == true
+    }
+
+    /// Cursor over video, strip, or the small gap between them — keep chrome stable.
+    private func isPointerOverChrome(at point: NSPoint = NSEvent.mouseLocation) -> Bool {
+        if isResizing || isInteractingWithChrome { return true }
+        // Inflate by stripGap so the band between video and strip does not thrash hide/show.
+        let pad = VibePlacer.stripGap + 4
+        if frame.insetBy(dx: -2, dy: -pad).contains(point) { return true }
+        if let strip = controlStrip, strip.frame.insetBy(dx: -2, dy: -pad).contains(point) {
+            return true
+        }
+        return false
+    }
+
+    private func keepChromeVisibleForInteraction() {
+        hideTimer?.cancel()
+        hideTimer = nil
+        if !isHovering { showControls() }
+        else { ensureStripAcceptsMouseWhileVisible() }
+    }
+
+    /// Called from the external strip panel so hover/click keeps chrome visible.
+    func noteStripInteraction() {
+        cursorWasInside = true
+        keepChromeVisibleForInteraction()
+    }
+
+    /// Strip mouseExited — only start the long idle hide if pointer left video+strip.
+    func noteStripPointerExited() {
+        if isResizing || isInteractingWithChrome { return }
+        if isPointerOverChrome() {
+            hideTimer?.cancel()
+            hideTimer = nil
+            return
+        }
+        scheduleHideControls(after: Self.chromeHideDelay)
+    }
+
+    /// While chrome is up, the strip must receive mouse (grips/buttons) — never click-through.
+    private func ensureStripAcceptsMouseWhileVisible() {
+        guard isHovering, let strip = controlStrip else { return }
+        if strip.ignoresMouseEvents {
+            strip.ignoresMouseEvents = false
+            strip.acceptsMouseMovedEvents = true
+        }
+        if strip.alphaValue < 0.95 {
+            strip.alphaValue = 1
         }
     }
 
@@ -1540,47 +2606,74 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             self?.startUpdateTimer()
             // After loading completes, hide title bar if mouse is not inside the window
             if !(self?.isHovering ?? false) {
-                NSAnimationContext.runAnimationGroup({ context in
-                    context.duration = 0.3
-                    self?.titleBarView.animator().alphaValue = 0
-                })
+                self?.hideControls()
             }
         })
     }
 
     private func triggerPlayback() {
-        // Trigger playback for all video elements + trigger YouTube iframe playback via postMessage.
-        // Also assert the user's mute intent — WKWebView's autoplay policy will often force
-        // audio off without an explicit unmute, and YouTube re-mutes around ad transitions.
         let wantMute = userWantsMute
         let mutedJSBool = wantMute ? "true" : "false"
         let ytMuteCmd = wantMute ? "'mute'" : "'unmute'"
+        // Never force volume 1.0 while ducked — keep the ducked level.
+        let playVol: Double = {
+            if wantMute { return 0 }
+            if isDucked {
+                return volumeSlider?.doubleValue ?? max(0.05, preDuckVolume * 0.2)
+            }
+            return 1.0
+        }()
+        let jwVol = Int(playVol * 100)
         let js = """
-        document.querySelectorAll('video').forEach(v => {
-            v.muted = \(mutedJSBool);
-            if (!\(mutedJSBool)) v.volume = 1.0;
-            v.play().catch(() => {});
-        });
-        if (window.playerCommand) {
-            window.playerCommand(\(ytMuteCmd));
-            if (!\(mutedJSBool)) window.playerCommand('volume', 1.0);
-            window.playerCommand('play');
-        }
-        var iframe = document.querySelector('iframe');
-        if (iframe) {
-            iframe.contentWindow.postMessage(JSON.stringify({event:'command',func:'playVideo',args:[]}), '*');
-        }
+        (function() {
+            var wantMute = \(mutedJSBool);
+            var playVol = \(playVol);
+            document.querySelectorAll('video').forEach(function(v) {
+                v.muted = wantMute;
+                if (!wantMute) v.volume = playVol;
+                v.play().catch(function() {});
+            });
+            if (window.jwplayer && typeof window.jwplayer === 'function') {
+                try {
+                    var jw = window.jwplayer();
+                    jw.setMute(wantMute);
+                    if (!wantMute) jw.setVolume(\(jwVol));
+                    if (jw.getState() !== 'playing') jw.play();
+                } catch(e) {}
+            }
+            if (window.playerCommand) {
+                window.playerCommand(\(ytMuteCmd));
+                if (!wantMute) window.playerCommand('volume', playVol);
+                window.playerCommand('play');
+            }
+            var iframe = document.querySelector('iframe');
+            if (iframe) {
+                try {
+                    iframe.contentWindow.postMessage(JSON.stringify({event:'command',func:'playVideo',args:[]}), '*');
+                } catch(e) {}
+            }
+        })();
         """
         webView.evaluateJavaScript(js, completionHandler: nil)
-        // Delayed retry (YouTube iframe may not be ready yet)
         DispatchQueue.main.asyncAfter(deadline: .now() + 0.5) { [weak self] in
+            self?.webView.evaluateJavaScript(js, completionHandler: nil)
+        }
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.2) { [weak self] in
             self?.webView.evaluateJavaScript(js, completionHandler: nil)
         }
     }
 
     @objc func closeWindow() {
+        emitProgress(force: true)
+        hideTimer?.cancel()
+        hideTimer = nil
         cursorPollTimer?.invalidate()
         cursorPollTimer = nil
+        vibeDock.stop()
+        VibeNowPlaying.clear()
+        controlStrip?.orderOut(nil)
+        controlStrip?.close()
+        controlStrip = nil
         resetYouTubeFallbackState()
         reinjectLayoutWorkItem?.cancel()
         reinjectLayoutWorkItem = nil
@@ -1594,62 +2687,542 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     private func showControls() {
         hideTimer?.cancel()
-        guard !isHovering else { return }
+        let already = isHovering
         isHovering = true
+        setStripChromeVisible(true, animated: already)
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.2
+            context.duration = already ? 0.08 : 0.16
             titleBarView.animator().alphaValue = 1.0
-            controlBarView.animator().alphaValue = 1.0
+            resizeIndicator?.animator().alphaValue = 0.85
         })
+        if let view = contentView { invalidateCursorRects(for: view) }
     }
 
-    private func scheduleHideControls() {
+    private func scheduleHideControls(after delay: TimeInterval = 2.5) {
+        if isResizing || isInteractingWithChrome || isPointerOverChrome() {
+            hideTimer?.cancel()
+            hideTimer = nil
+            return
+        }
         hideTimer?.cancel()
         let work = DispatchWorkItem { [weak self] in
             self?.hideControls()
         }
         hideTimer = work
-        DispatchQueue.main.asyncAfter(deadline: .now() + 1.5, execute: work)
+        DispatchQueue.main.asyncAfter(deadline: .now() + delay, execute: work)
+    }
+
+    /// Schedule idle hide only when the pointer has left video + strip.
+    private func scheduleHideControlsIfPointerLeft(after delay: TimeInterval = 2.5) {
+        if isPointerOverChrome() {
+            hideTimer?.cancel()
+            hideTimer = nil
+            keepChromeVisibleForInteraction()
+            return
+        }
+        scheduleHideControls(after: delay)
     }
 
     private func hideControls() {
         guard isHovering else { return }
-        if isResizing {
-            // Can't hide during resize; reschedule so controls hide once resize ends
-            scheduleHideControls()
+        if isResizing || isInteractingWithChrome || isPointerOverChrome() {
+            // Pointer returned (or still on strip/grips) — restore solid chrome, no flicker.
+            hideTimer = nil
+            keepChromeVisibleForInteraction()
             return
         }
         isHovering = false
+        setStripChromeVisible(false, animated: true)
         NSAnimationContext.runAnimationGroup({ context in
-            context.duration = 0.3
+            context.duration = 0.18
             titleBarView.animator().alphaValue = 0
-            controlBarView.animator().alphaValue = 0
+            resizeIndicator?.animator().alphaValue = 0
+        }, completionHandler: { [weak self] in
+            guard let self = self, !self.isHovering else { return }
+            if let view = self.contentView { self.invalidateCursorRects(for: view) }
         })
     }
 
-    private func makeControlButton(x: CGFloat, symbolName: String, action: Selector) -> NSButton {
-        let btn = NSButton(frame: NSRect(x: x, y: 6, width: 28, height: 28))
+    /// Fade the external strip. When hidden, ignore mouse so the band does not
+    /// block the IDE; cursor polling still reveals via strip frame hit-test.
+    /// Never set ignoresMouseEvents=true while the pointer is over the strip.
+    private func setStripChromeVisible(_ visible: Bool, animated: Bool) {
+        guard let strip = controlStrip else { return }
+        let target: CGFloat = visible ? 1 : 0
+        if visible {
+            strip.ignoresMouseEvents = false
+            strip.acceptsMouseMovedEvents = true
+            if isWindowVisible { strip.orderFrontRegardless() }
+        }
+        if animated {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = visible ? 0.16 : 0.2
+                strip.animator().alphaValue = target
+            }, completionHandler: { [weak self, weak strip] in
+                guard let self = self, let strip = strip else { return }
+                if visible {
+                    strip.ignoresMouseEvents = false
+                    return
+                }
+                // Click-through only when fully hidden AND pointer is away from chrome.
+                if !self.isHovering && !self.isPointerOverChrome() {
+                    strip.ignoresMouseEvents = true
+                } else {
+                    strip.ignoresMouseEvents = false
+                    if self.isPointerOverChrome() {
+                        self.isHovering = true
+                        strip.alphaValue = 1
+                    }
+                }
+            })
+        } else {
+            strip.alphaValue = target
+            if visible {
+                strip.ignoresMouseEvents = false
+            } else if !isPointerOverChrome() {
+                strip.ignoresMouseEvents = true
+            } else {
+                strip.ignoresMouseEvents = false
+            }
+        }
+    }
+
+    private func makeStripResizeGrip(isLeft: Bool) -> NSView {
+        let width = ControlStripPanel.resizeEdgeWidth
+        let grip = NSView(frame: NSRect(x: 0, y: 0, width: width, height: 58))
+        grip.wantsLayer = true
+        grip.layer?.backgroundColor = NSColor(white: 1, alpha: 0.06).cgColor
+
+        let pillW: CGFloat = 5
+        let pillH: CGFloat = 22
+        let pill = NSView(frame: NSRect(
+            x: isLeft ? 10 : width - 10 - pillW,
+            y: (58 - pillH) / 2,
+            width: pillW,
+            height: pillH
+        ))
+        pill.wantsLayer = true
+        pill.layer?.backgroundColor = NSColor(white: 1, alpha: 0.38).cgColor
+        pill.layer?.cornerRadius = pillW / 2
+        pill.autoresizingMask = [.minYMargin, .maxYMargin]
+        grip.addSubview(pill)
+        grip.toolTip = "Kéo để đổi kích thước"
+        return grip
+    }
+
+    private func makeSizePresetChip(_ preset: SizePreset) -> NSButton {
+        let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 36, height: 22))
+        btn.bezelStyle = .inline
         btn.isBordered = false
         btn.wantsLayer = true
-        btn.layer?.backgroundColor = NSColor.clear.cgColor
+        btn.layer?.cornerRadius = 6
+        btn.title = preset.chipTitle
+        btn.font = NSFont.systemFont(ofSize: 10, weight: .semibold)
+        btn.contentTintColor = .white
+        btn.target = self
+        btn.action = #selector(sizePresetChipClicked(_:))
+        let chips: [SizePreset] = [.mini, .standard, .wide]
+        btn.tag = chips.firstIndex(of: preset) ?? 0
+        let hotkey = (chips.firstIndex(of: preset) ?? 0) + 1
+        btn.toolTip = "\(preset.menuTitle) — phím ⌃⌥\(hotkey)"
+        return btn
+    }
+
+    @objc private func sizePresetChipClicked(_ sender: NSButton) {
+        let presets: [SizePreset] = [.mini, .standard, .wide]
+        let idx = sender.tag
+        guard presets.indices.contains(idx) else { return }
+        applySizePreset(presets[idx])
+    }
+
+    func applySizePreset(_ preset: SizePreset) {
+        noteStripInteraction()
+        selectedSizePreset = preset
+        Self.persistSizePreset(preset)
+        refreshSizePresetChipStyles()
+
+        isMaximized = false
+        setButtonSymbol(maximizeButton, "arrow.up.left.and.arrow.down.right")
+
+        // Freeze auto-dock briefly so placer does not shrink the new size away.
+        presetHoldWorkItem?.cancel()
+        autoDockPaused = true
+        isResizing = true
+
+        let screen = self.screen ?? NSScreen.main
+        let vis = screen?.visibleFrame ?? frame
+        let old = frame
+        var targetW: CGFloat
+        var targetH: CGFloat
+        var origin = old.origin
+
+        if preset == .pocket {
+            let maxW = min(vis.width - 32, maxSize.width)
+            let maxH = min(vis.height - VibePlacer.stripHeight - 32, maxW / videoAspectRatio)
+            targetW = min(maxW, maxH * videoAspectRatio)
+            targetH = targetW / videoAspectRatio
+            let obstacles = vibeDock.liveObstacles(on: vis)
+            if let decision = VibePlacer.bestFrame(
+                size: NSSize(width: targetW, height: targetH),
+                screen: vis,
+                obstacles: obstacles
+            ) {
+                applyDock(videoFrame: decision.frame, animated: true)
+                showHUD("Cỡ Lớn — \(Int(decision.frame.width))×\(Int(decision.frame.height))")
+                finishPresetHold()
+                return
+            }
+        } else {
+            targetW = preset.targetWidth ?? 500
+        }
+
+        let minW = minSize.width
+        let maxW = max(maxSize.width, minW)
+        targetW = min(max(targetW, minW), maxW)
+        if let screen = screen {
+            targetW = min(targetW, max(minW, screen.visibleFrame.width - 16))
+        }
+        targetH = targetW / videoAspectRatio
+        if let screen = screen {
+            let maxH = max(minW / videoAspectRatio, screen.visibleFrame.height - VibePlacer.stripHeight - 24)
+            if targetH > maxH {
+                targetH = maxH
+                targetW = targetH * videoAspectRatio
+            }
+        }
+
+        // Keep the nearest screen-corner anchor so the player stays where it was docked.
+        let preferRight = old.midX >= vis.midX
+        let preferTop = old.midY >= vis.midY
+        origin.x = preferRight ? old.maxX - targetW : old.minX
+        origin.y = preferTop ? old.maxY - targetH : old.minY
+        origin.x = min(max(origin.x, vis.minX + 4), vis.maxX - targetW - 4)
+        origin.y = min(max(origin.y, vis.minY + 4 + VibePlacer.stripHeight), vis.maxY - targetH - 4)
+
+        let newFrame = NSRect(origin: origin, size: NSSize(width: targetW, height: targetH))
+        setFrame(newFrame, display: true, animate: false)
+        syncControlStrip(animated: false)
+        layoutControlBar()
+        vibeDock.noteUserDidPlace()
+        saveWindowFrame()
+        showHUD("\(preset.chipTitle) — \(Int(targetW))px")
+        finishPresetHold()
+    }
+
+    private func finishPresetHold() {
+        presetHoldWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let self = self else { return }
+            self.isResizing = false
+            self.autoDockPaused = false
+            self.scheduleHideControlsIfPointerLeft(after: Self.chromeHideDelay)
+        }
+        presetHoldWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + 1.0, execute: work)
+    }
+
+    private func refreshSizePresetChipStyles() {
+        let map: [(NSButton?, SizePreset)] = [
+            (sizePresetMiniButton, .mini),
+            (sizePresetStandardButton, .standard),
+            (sizePresetWideButton, .wide),
+        ]
+        for (button, preset) in map {
+            guard let button = button else { continue }
+            let on = selectedSizePreset == preset
+            button.layer?.backgroundColor = NSColor(white: 1.0, alpha: on ? 0.28 : 0.10).cgColor
+            button.contentTintColor = on ? NSColor(red: 1, green: 0.85, blue: 0.35, alpha: 1) : .white
+        }
+    }
+
+    // MARK: - Auto next episode / skip intro
+
+    var isAutoNextEpisodeEnabled: Bool { Self.preferredAutoNextEpisode }
+    var isAutoSkipIntroEnabled: Bool { Self.preferredAutoSkipIntro }
+
+    @objc func toggleAutoNextEpisode() {
+        let next = Self.setPreferredAutoNextEpisode(!Self.preferredAutoNextEpisode)
+        refreshWatchAssistButtonStyles()
+        showHUD(next ? "Tự chuyển tập: Bật" : "Tự chuyển tập: Tắt")
+        noteStripInteraction()
+    }
+
+    @objc func toggleAutoSkipIntro() {
+        let next = Self.setPreferredAutoSkipIntro(!Self.preferredAutoSkipIntro)
+        refreshWatchAssistButtonStyles()
+        showHUD(next ? "Tự bỏ GT: Bật" : "Tự bỏ GT: Tắt")
+        noteStripInteraction()
+    }
+
+    @objc func manualSkipIntro() {
+        // Option-click toggles auto preference instead of seeking.
+        if NSApp.currentEvent?.modifierFlags.contains(.option) == true {
+            toggleAutoSkipIntro()
+            return
+        }
+        noteStripInteraction()
+        let end = introEndSeconds(forDuration: max(playbackDuration, 600))
+        userSeekedThisEpisode = true
+        didAutoSkipIntroThisEpisode = true
+        if let slug = movieContext?.slug {
+            Self.rememberIntroEnd(end, forSlug: slug)
+        }
+        seekTo(seconds: end)
+        showHUD("Đã bỏ qua giới thiệu")
+    }
+
+    private func introEndSeconds(forDuration duration: Double) -> Double {
+        let slug = movieContext?.slug ?? ""
+        if let remembered = Self.rememberedIntroEnd(forSlug: slug) {
+            return min(remembered, max(30, duration * 0.15))
+        }
+        return min(Self.defaultIntroSeconds, max(30, duration * 0.15))
+    }
+
+    /// Called from vibe-sync / HTTP API after toggling prefs.
+    func refreshWatchAssistFromAPI() {
+        refreshWatchAssistButtonStyles()
+        layoutControlBar()
+    }
+
+    private func refreshWatchAssistButtonStyles() {
+        if let btn = stripAutoNextButton {
+            let on = Self.preferredAutoNextEpisode
+            setButtonSymbol(btn, on ? "forward.end.alt.fill" : "forward.end.alt")
+            btn.contentTintColor = on ? NSColor(red: 0.35, green: 0.85, blue: 0.55, alpha: 1) : .white
+            btn.toolTip = on
+                ? "Tự chuyển tập: Bật — bấm để tắt"
+                : "Tự chuyển tập: Tắt — bấm để bật"
+            btn.isHidden = movieContext?.hasPlaylist != true
+        }
+        if let btn = stripSkipIntroButton {
+            let on = Self.preferredAutoSkipIntro
+            btn.contentTintColor = on ? NSColor(red: 0.45, green: 0.75, blue: 1.0, alpha: 1) : .white
+            btn.toolTip = on
+                ? "Bỏ qua GT (bấm). ⌥+bấm: tắt tự động"
+                : "Bỏ qua GT (bấm). ⌥+bấm: bật tự động"
+            btn.isHidden = movieContext == nil
+        }
+    }
+
+    private func resetEpisodeWatchAssistState() {
+        didAutoSkipIntroThisEpisode = false
+        userSeekedThisEpisode = false
+        didAutoAdvanceThisEpisode = false
+        lastPlaybackSample = 0
+    }
+
+    private func handleWatchAssist(currentTime ct: Double, duration dur: Double, paused: Bool) {
+        // Detect manual seeks (scrub / skip) so auto-intro does not fight the user.
+        if lastPlaybackSample > 0, abs(ct - lastPlaybackSample) > 3.5, abs(ct - lastPlaybackSample) < 600 {
+            // Large jump while playing usually means seek (not episode reload).
+            if ct + 1 < lastPlaybackSample || ct > lastPlaybackSample + 4 {
+                userSeekedThisEpisode = true
+            }
+        }
+        lastPlaybackSample = ct
+
+        guard !paused, dur.isFinite, dur > 1 else { return }
+
+        // Auto skip intro — once per episode, long-form only.
+        if Self.preferredAutoSkipIntro,
+           !didAutoSkipIntroThisEpisode,
+           !userSeekedThisEpisode,
+           movieContext != nil,
+           dur >= Self.minEpisodeSecondsForIntroSkip {
+            let introEnd = introEndSeconds(forDuration: dur)
+            if ct >= 5, ct < introEnd - 1 {
+                didAutoSkipIntroThisEpisode = true
+                seekTo(seconds: introEnd)
+                showHUD("Đã bỏ qua giới thiệu")
+                return
+            }
+            if ct >= introEnd {
+                didAutoSkipIntroThisEpisode = true
+            }
+        }
+
+        // Auto next episode near end.
+        guard Self.preferredAutoNextEpisode,
+              movieContext?.hasPlaylist == true,
+              !didAutoAdvanceThisEpisode,
+              !paused else { return }
+        if ct >= max(0, dur - 5) {
+            didAutoAdvanceThisEpisode = true
+            _ = switchEpisode(by: 1)
+        }
+    }
+
+    private func layoutControlBar() {
+        guard let controlBar = controlBarView else { return }
+        let w = controlBar.bounds.width
+        let barH = max(controlBar.bounds.height, 58)
+        let compact = w < 420
+        let edge = ControlStripPanel.resizeEdgeWidth
+
+        stripLeftGrip?.frame = NSRect(x: 0, y: 0, width: edge, height: barH)
+        stripRightGrip?.frame = NSRect(x: w - edge, y: 0, width: edge, height: barH)
+        if let pill = stripLeftGrip?.subviews.first {
+            let pillH = pill.frame.height
+            pill.frame.origin = CGPoint(x: 10, y: (barH - pillH) / 2)
+        }
+        if let pill = stripRightGrip?.subviews.first {
+            let pillH = pill.frame.height
+            pill.frame.origin = CGPoint(x: edge - 10 - pill.frame.width, y: (barH - pillH) / 2)
+        }
+
+        let scrubberMargin: CGFloat = 12
+        scrubberView?.frame = NSRect(x: scrubberMargin, y: barH - 16, width: max(40, w - scrubberMargin * 2), height: 14)
+
+        // Priority keep at ~380 (coding-safe): play · scrub · ghost · duck · size · close
+        // (+ prev/next when playlist). Overflow menu for the rest.
+        // Leave L/R edge clear for resize grips.
+        var x: CGFloat = edge + 4
+        func placeLeft(_ button: NSButton?, width: CGFloat, show: Bool = true) {
+            guard let button = button else { return }
+            guard show else {
+                button.isHidden = true
+                return
+            }
+            button.isHidden = false
+            button.frame = NSRect(x: x, y: 6, width: width, height: 28)
+            x += width + 6
+        }
+
+        let hasEpNav = movieContext?.hasPlaylist == true
+        placeLeft(playPauseButton, width: 32)
+        placeLeft(stripPrevEpisodeButton, width: 28, show: hasEpNav)
+        placeLeft(stripNextEpisodeButton, width: 28, show: hasEpNav)
+        placeLeft(rewindButton, width: 28, show: !compact)
+        placeLeft(skipButton, width: 28, show: !compact)
+        placeLeft(volumeButton, width: 28, show: !compact)
+
+        var right = w - edge - 4
+        var overflowNeeded = compact
+        func placeRight(_ button: NSButton?, width: CGFloat, required: Bool = false) {
+            guard let button = button else { return }
+            if right - width < x + 8 {
+                button.isHidden = true
+                if required { overflowNeeded = true }
+                return
+            }
+            right -= width
+            button.isHidden = false
+            button.frame = NSRect(x: right, y: 6, width: width, height: 28)
+            right -= 6
+        }
+
+        // Right-to-left: close · ghost · duck · auto-next · presets · (skip intro / +/- overflow)
+        placeRight(stripCloseButton, width: 28, required: true)
+        placeRight(stripGhostButton, width: 28, required: true)
+        placeRight(stripDuckButton, width: 28, required: true)
+        placeRight(stripAutoNextButton, width: 28, required: movieContext?.hasPlaylist == true)
+        placeRight(sizePresetWideButton, width: 34, required: true)
+        placeRight(sizePresetStandardButton, width: 34, required: true)
+        placeRight(sizePresetMiniButton, width: 34, required: true)
+        // Fine +/- and skip-intro prefer strip when space allows; else overflow.
+        placeRight(stripSkipIntroButton, width: 28, required: false)
+        placeRight(sizeUpButton, width: 28, required: false)
+        placeRight(sizeDownButton, width: 28, required: false)
+
+        if compact {
+            maximizeButton?.isHidden = true
+            speedButton?.isHidden = true
+            volumeSlider?.isHidden = true
+            timeLabel?.isHidden = true
+            overflowNeeded = true
+        } else {
+            placeRight(maximizeButton, width: 28)
+
+            let showSpeed = right - 40 >= x + 8
+            speedButton?.isHidden = !showSpeed
+            if showSpeed {
+                right -= 40
+                speedButton?.frame = NSRect(x: right, y: 8, width: 40, height: 22)
+                right -= 6
+            } else {
+                overflowNeeded = true
+            }
+
+            let showSlider = right - 52 >= x + 8
+            volumeSlider?.isHidden = !showSlider
+            if showSlider {
+                volumeSlider?.frame = NSRect(x: x, y: 10, width: 52, height: 20)
+                x += 58
+            } else {
+                overflowNeeded = true
+            }
+
+            let timeW = right - x - (overflowNeeded ? 34 : 0)
+            if timeW >= 64 {
+                timeLabel?.isHidden = false
+                timeLabel?.frame = NSRect(x: x, y: 8, width: timeW, height: 18)
+                timeLabel?.alignment = .center
+            } else {
+                timeLabel?.isHidden = true
+            }
+        }
+
+        if overflowNeeded {
+            placeRight(stripMoreButton, width: 28)
+            // Force overflow left of the size cluster if space ran out.
+            if stripMoreButton?.isHidden == true, let more = stripMoreButton {
+                let anchor = sizePresetMiniButton ?? sizeDownButton ?? sizeUpButton
+                if let anchor = anchor {
+                    more.isHidden = false
+                    more.frame = NSRect(x: anchor.frame.minX - 34, y: 6, width: 28, height: 28)
+                }
+            }
+        } else {
+            stripMoreButton?.isHidden = true
+        }
+    }
+
+    private func makePrimaryPlayButton(action: Selector) -> NSButton {
+        let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 34, height: 34))
+        btn.isBordered = false
+        btn.wantsLayer = true
+        btn.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.16).cgColor
+        btn.layer?.cornerRadius = 17
+        btn.layer?.borderWidth = 0.8
+        btn.layer?.borderColor = NSColor(white: 1.0, alpha: 0.28).cgColor
         btn.contentTintColor = .white
         btn.target = self
         btn.action = action
+        if let img = NSImage(systemSymbolName: "play.fill", accessibilityDescription: "Phát/Tạm dừng") {
+            let config = NSImage.SymbolConfiguration(pointSize: 15, weight: .bold)
+            btn.image = img.withSymbolConfiguration(config)
+            btn.title = ""
+            btn.imagePosition = .imageOnly
+        }
+        return btn
+    }
+
+    private func makeControlButton(symbolName: String, action: Selector, pointSize: CGFloat = 13) -> NSButton {
+        let btn = NSButton(frame: NSRect(x: 0, y: 0, width: 28, height: 28))
+        btn.isBordered = false
+        btn.wantsLayer = true
+        btn.layer?.backgroundColor = NSColor(white: 1.0, alpha: 0.08).cgColor
+        btn.layer?.cornerRadius = 14
+        btn.contentTintColor = NSColor(white: 0.95, alpha: 1.0)
+        btn.target = self
+        btn.action = action
         if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            let config = NSImage.SymbolConfiguration(pointSize: pointSize, weight: .semibold)
             btn.image = img.withSymbolConfiguration(config)
             btn.title = ""
             btn.imagePosition = .imageOnly
         } else {
             btn.title = symbolName
-            btn.font = NSFont.systemFont(ofSize: 14)
+            btn.font = NSFont.systemFont(ofSize: pointSize, weight: .semibold)
         }
         return btn
     }
 
-    private func setButtonSymbol(_ btn: NSButton, _ symbolName: String) {
+    private func setButtonSymbol(_ btn: NSButton, _ symbolName: String, pointSize: CGFloat? = nil) {
         if let img = NSImage(systemSymbolName: symbolName, accessibilityDescription: nil) {
-            let config = NSImage.SymbolConfiguration(pointSize: 14, weight: .medium)
+            let ps = pointSize ?? ((btn == playPauseButton) ? 15 : 13)
+            let config = NSImage.SymbolConfiguration(pointSize: ps, weight: (btn == playPauseButton) ? .bold : .semibold)
             btn.image = img.withSymbolConfiguration(config)
             btn.title = ""
         } else {
@@ -1657,38 +3230,80 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         }
     }
 
-    private func videoJS(_ directJS: String, youtubeCmd: String? = nil) {
-        var js = "var v = document.querySelector('video'); if(v) { \(directJS) }"
+    private func videoJS(_ directJS: String, youtubeCmd: String? = nil, jwAction: String? = nil) {
+        var js = """
+        (function() {
+            var v = document.querySelector('video');
+            if (!v) {
+                try {
+                    var iframes = document.querySelectorAll('iframe');
+                    for (var i = 0; i < iframes.length; i++) {
+                        var iv = iframes[i].contentDocument.querySelector('video');
+                        if (iv) { v = iv; break; }
+                    }
+                } catch(e) {}
+            }
+            if (v) {
+                \(directJS)
+            } else if (window.jwplayer && typeof window.jwplayer === 'function') {
+                try {
+                    var jw = window.jwplayer();
+                    \(jwAction ?? "")
+                } catch(e) {}
+            }
+        """
         if let cmd = youtubeCmd {
-            js += " else if(window.playerCommand) { \(cmd) }"
+            js += """
+            else if (window.playerCommand) {
+                \(cmd)
+            }
+            """
         }
+        js += "})();"
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
 
     @objc func togglePlayPause() {
         if isPlaying {
-            videoJS("v.pause()", youtubeCmd: "playerCommand('pause')")
+            videoJS("v.pause()",
+                    youtubeCmd: "playerCommand('pause')",
+                    jwAction: "jw.pause()")
+            isPlaying = false
         } else {
-            videoJS("v.play().catch(()=>{})", youtubeCmd: "playerCommand('play')")
+            videoJS("v.play().catch(()=>{})",
+                    youtubeCmd: "playerCommand('play')",
+                    jwAction: "jw.play()")
+            isPlaying = true
         }
-        isPlaying.toggle()
         setButtonSymbol(playPauseButton, isPlaying ? "pause.fill" : "play.fill")
     }
 
+    @objc func skipBackward() {
+        userSeekedThisEpisode = true
+        videoJS("v.currentTime = Math.max(0, v.currentTime - 10)",
+                youtubeCmd: "playerCommand('seek', Math.max(0, (window.getPlayerState()?.ct||0)-10))",
+                jwAction: "jw.seek(Math.max(0, (jw.getPosition()||0) - 10))")
+    }
+
     @objc func skipForward() {
-        videoJS("v.currentTime += 10",
-                youtubeCmd: "playerCommand('seek', (window.getPlayerState()?.ct||0)+10)")
+        userSeekedThisEpisode = true
+        videoJS("v.currentTime = Math.min(v.duration || 999999, v.currentTime + 10)",
+                youtubeCmd: "playerCommand('seek', (window.getPlayerState()?.ct||0)+10)",
+                jwAction: "jw.seek((jw.getPosition()||0) + 10)")
     }
 
     @objc func toggleMute() {
         userWantsMute.toggle()
         if userWantsMute {
-            videoJS("v.muted = true", youtubeCmd: "playerCommand('mute')")
+            videoJS("v.muted = true",
+                    youtubeCmd: "playerCommand('mute')",
+                    jwAction: "jw.setMute(true)")
             setButtonSymbol(volumeButton, "speaker.slash.fill")
             volumeSlider.doubleValue = 0
         } else {
             videoJS("v.muted = false; v.volume = 1.0",
-                    youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)")
+                    youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)",
+                    jwAction: "jw.setMute(false); jw.setVolume(100)")
             setButtonSymbol(volumeButton, "speaker.wave.2.fill")
             volumeSlider.doubleValue = 1.0
         }
@@ -1698,19 +3313,218 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let vol = sender.doubleValue
         let muted = vol == 0
         videoJS("v.volume = \(vol); v.muted = \(muted)",
-                youtubeCmd: "playerCommand('volume', \(vol)); playerCommand(\(muted ? "'mute'" : "'unmute'"))")
+                youtubeCmd: "playerCommand('volume', \(vol)); playerCommand(\(muted ? "'mute'" : "'unmute'"))",
+                jwAction: "jw.setVolume(\(Int(vol * 100))); jw.setMute(\(muted))")
         userWantsMute = muted
         setButtonSymbol(volumeButton, userWantsMute ? "speaker.slash.fill" : "speaker.wave.2.fill")
     }
 
+    func adjustVolume(by delta: Double) {
+        let current = userWantsMute ? 0 : volumeSlider.doubleValue
+        let newVol = max(0, min(1.0, current + delta))
+        volumeSlider.doubleValue = newVol
+        volumeChanged(volumeSlider)
+    }
+
+    @objc func cyclePlaybackRate() {
+        currentRateIndex = (currentRateIndex + 1) % playbackRates.count
+        let rate = playbackRates[currentRateIndex]
+        let rateStr = (rate == 1.0) ? "1.0x" : (rate.truncatingRemainder(dividingBy: 1) == 0 ? "\(Int(rate)).0x" : "\(rate)x")
+        speedButton.title = rateStr
+        videoJS("v.playbackRate = \(rate)",
+                youtubeCmd: "playerCommand('setPlaybackRate', \(rate))",
+                jwAction: "jw.setPlaybackRate(\(rate))")
+    }
+
+    @objc func toggleMaximize() {
+        guard let screen = self.screen ?? NSScreen.main else { return }
+        let vis = screen.visibleFrame
+        if isMaximized {
+            isMaximized = false
+            setButtonSymbol(maximizeButton, "arrow.up.left.and.arrow.down.right")
+            if preMaximizeFrame != .zero && vis.intersects(preMaximizeFrame) {
+                applyDock(videoFrame: preMaximizeFrame, animated: true)
+            } else {
+                let defaultW: CGFloat = 640
+                let defaultH = defaultW / videoAspectRatio
+                let frame = NSRect(
+                    x: vis.maxX - defaultW - 24,
+                    y: vis.maxY - defaultH - 24,
+                    width: defaultW,
+                    height: defaultH
+                )
+                applyDock(videoFrame: frame, animated: true)
+                placeAwayFromCode()
+            }
+        } else {
+            isMaximized = true
+            preMaximizeFrame = self.frame
+            setButtonSymbol(maximizeButton, "arrow.down.right.and.arrow.up.left")
+            // Fit the largest size that still clears coding/input pockets when possible.
+            let maxWidth = min(vis.width - 48, maxSize.width)
+            let maxHeight = min(vis.height - 48 - VibePlacer.stripHeight, maxWidth / videoAspectRatio)
+            var targetW = maxHeight * videoAspectRatio
+            var targetH = maxHeight
+            if targetW > maxWidth {
+                targetW = maxWidth
+                targetH = targetW / videoAspectRatio
+            }
+            let obstacles = vibeDock.liveObstacles(on: vis)
+            if let decision = VibePlacer.bestFrame(
+                size: NSSize(width: targetW, height: targetH),
+                screen: vis,
+                obstacles: obstacles
+            ), decision.isClear {
+                applyDock(videoFrame: decision.frame, animated: true)
+            } else if let decision = VibePlacer.bestFrame(
+                size: NSSize(width: min(targetW, 720), height: min(targetW, 720) / videoAspectRatio),
+                screen: vis,
+                obstacles: obstacles
+            ), decision.isClear {
+                applyDock(videoFrame: decision.frame, animated: true)
+            } else {
+                // No pocket for a large player — use coding-safe corner instead of covering the IDE.
+                isMaximized = false
+                setButtonSymbol(maximizeButton, "arrow.up.left.and.arrow.down.right")
+                let preferred = NSRect(
+                    x: vis.maxX - 400 - 14,
+                    y: vis.maxY - 400 / videoAspectRatio - 14,
+                    width: 400,
+                    height: 400 / videoAspectRatio
+                )
+                applyCodingSafeMode(preferred: preferred)
+            }
+        }
+        DispatchQueue.main.async { [weak self] in
+            self?.layoutControlBar()
+            self?.syncControlStrip(animated: true)
+        }
+    }
+
+    @objc func applySizePresetMini() { applySizePreset(.mini) }
+    @objc func applySizePresetStandard() { applySizePreset(.standard) }
+    @objc func applySizePresetWide() { applySizePreset(.wide) }
+    @objc func applySizePresetPocket() { applySizePreset(.pocket) }
+
+    @objc func growWindow() {
+        adjustWindowScale(by: 1.18)
+        showControls()
+        scheduleHideControlsIfPointerLeft(after: Self.chromeHideDelay)
+    }
+
+    @objc func shrinkWindow() {
+        adjustWindowScale(by: 1.0 / 1.18)
+        showControls()
+        scheduleHideControlsIfPointerLeft(after: Self.chromeHideDelay)
+    }
+
+    /// Scale the floating window while keeping aspect ratio and staying on-screen.
+    @discardableResult
+    func adjustWindowScale(by factor: CGFloat) -> NSSize {
+        guard factor > 0 else { return frame.size }
+        isMaximized = false
+        setButtonSymbol(maximizeButton, "arrow.up.left.and.arrow.down.right")
+
+        let minW = minSize.width
+        let maxW = max(maxSize.width, minW)
+        var newW = frame.width * factor
+        newW = min(max(newW, minW), maxW)
+        var newH = newW / videoAspectRatio
+
+        if let screen = screen ?? NSScreen.main {
+            let vis = screen.visibleFrame
+            let maxFitW = max(minW, vis.width - 16)
+            let maxFitH = max(minW / videoAspectRatio, vis.height - VibePlacer.stripHeight - 24)
+            if newW > maxFitW {
+                newW = maxFitW
+                newH = newW / videoAspectRatio
+            }
+            if newH > maxFitH {
+                newH = maxFitH
+                newW = newH * videoAspectRatio
+            }
+        }
+
+        var newFrame = frame
+        // Grow/shrink from the center so the window feels anchored in place.
+        newFrame.origin.x += (frame.width - newW) / 2
+        newFrame.origin.y += (frame.height - newH) / 2
+        newFrame.size = NSSize(width: newW, height: newH)
+
+        if let screen = screen ?? NSScreen.main {
+            let vis = screen.visibleFrame
+            newFrame.origin.x = min(max(newFrame.origin.x, vis.minX + 4), vis.maxX - newFrame.width - 4)
+            newFrame.origin.y = min(max(newFrame.origin.y, vis.minY + 4 + VibePlacer.stripHeight), vis.maxY - newFrame.height - 4)
+        }
+
+        setFrame(newFrame, display: true, animate: false)
+        syncControlStrip(animated: false)
+        vibeDock.noteUserDidPlace()
+        saveWindowFrame()
+        layoutControlBar()
+        return newFrame.size
+    }
+
+    /// Absolute width setter used by vibe-sync / API (`height` follows aspect ratio).
+    @discardableResult
+    func setWindowWidth(_ width: CGFloat) -> NSSize {
+        guard width > 0 else { return frame.size }
+        let factor = width / max(frame.width, 1)
+        return adjustWindowScale(by: factor)
+    }
+
     private func seekTo(percent: Double) {
         let js = """
-        var v = document.querySelector('video');
-        if (v && v.duration) { v.currentTime = v.duration * \(percent); }
-        else if (window.getPlayerState && window.playerCommand) {
-            var s = window.getPlayerState();
-            if (s) playerCommand('seek', s.dur * \(percent));
-        }
+        (function() {
+            var v = document.querySelector('video');
+            if (!v) {
+                try {
+                    var iframes = document.querySelectorAll('iframe');
+                    for (var i = 0; i < iframes.length; i++) {
+                        var iv = iframes[i].contentDocument.querySelector('video');
+                        if (iv) { v = iv; break; }
+                    }
+                } catch(e) {}
+            }
+            if (v && v.duration) {
+                v.currentTime = v.duration * \(percent);
+            } else if (window.jwplayer && typeof window.jwplayer === 'function') {
+                try {
+                    var dur = window.jwplayer().getDuration();
+                    if (dur > 0) window.jwplayer().seek(dur * \(percent));
+                } catch(e) {}
+            } else if (window.getPlayerState && window.playerCommand) {
+                var s = window.getPlayerState();
+                if (s && s.dur) playerCommand('seek', s.dur * \(percent));
+            }
+        })();
+        """
+        webView.evaluateJavaScript(js, completionHandler: nil)
+    }
+
+    func seekTo(seconds: Double) {
+        let safe = max(0, seconds)
+        let js = """
+        (function() {
+            var t = \(safe);
+            var v = document.querySelector('video');
+            if (!v) {
+                try {
+                    var iframes = document.querySelectorAll('iframe');
+                    for (var i = 0; i < iframes.length; i++) {
+                        var iv = iframes[i].contentDocument.querySelector('video');
+                        if (iv) { v = iv; break; }
+                    }
+                } catch(e) {}
+            }
+            if (v && isFinite(v.duration)) {
+                v.currentTime = Math.min(t, Math.max(0, v.duration - 0.25));
+            } else if (window.jwplayer && typeof window.jwplayer === 'function') {
+                try { window.jwplayer().seek(t); } catch(e) {}
+            } else if (window.playerCommand) {
+                playerCommand('seek', t);
+            }
+        })();
         """
         webView.evaluateJavaScript(js, completionHandler: nil)
     }
@@ -1721,9 +3535,6 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         updateTimer?.invalidate()
         updateTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
             guard let self = self else { return }
-            // Always run: polling drives audio-intent reconciliation, not just UI.
-            // Skipping while controls are hidden would leave the page muted when
-            // YouTube re-mutes during ad transitions and the cursor isn't inside.
             self.pollVideoState()
         }
     }
@@ -1737,20 +3548,44 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let js = """
         (function() {
             var v = document.querySelector('video');
+            if (!v) {
+                try {
+                    var iframes = document.querySelectorAll('iframe');
+                    for (var i = 0; i < iframes.length; i++) {
+                        var iv = iframes[i].contentDocument.querySelector('video');
+                        if (iv) { v = iv; break; }
+                    }
+                } catch(e) {}
+            }
             if (v) {
-                // Consume any pending trusted-click request atomically with the
-                // current ad state so the native side never fires a stale click
-                // after the ad has already ended.
                 var tc = window.__floatVideoPendingTrustedClick || null;
                 window.__floatVideoPendingTrustedClick = null;
                 var mp = document.querySelector('#movie_player, .html5-video-player');
                 var ads = !!(mp && (mp.classList.contains('ad-showing') ||
                                     mp.classList.contains('ad-interrupting')));
-                return { ct: v.currentTime, dur: v.duration, vol: v.volume, muted: v.muted, paused: v.paused,
+                return { ct: v.currentTime || 0, dur: v.duration || 0, vol: v.volume, muted: v.muted, paused: v.paused,
                          skips: window.__floatVideoAdSkipCount || 0,
                          ff: window.__floatVideoAdFFCount || 0,
                          adSkipInstalled: !!window.__floatVideoAdSkipInstalled,
                          tc: tc, ads: ads };
+            }
+            if (window.jwplayer && typeof window.jwplayer === 'function') {
+                try {
+                    var jw = window.jwplayer();
+                    var state = jw.getState();
+                    return {
+                        ct: jw.getPosition() || 0,
+                        dur: jw.getDuration() || 0,
+                        vol: (jw.getVolume() || 100) / 100,
+                        muted: jw.getMute() || false,
+                        paused: (state !== 'playing' && state !== 'buffering'),
+                        skips: 0,
+                        ff: 0,
+                        adSkipInstalled: true,
+                        tc: null,
+                        ads: (state === 'ad')
+                    };
+                } catch(e) {}
             }
             if (window.getPlayerState) return window.getPlayerState();
             return null;
@@ -1764,8 +3599,6 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             let muted = dict["muted"] as? Bool ?? false
             let paused = dict["paused"] as? Bool ?? true
 
-            // Diagnostics: log whenever the in-page ad-skip guard has clicked Skip
-            // since the last poll (the guard runs in-page, so surface it natively).
             let skips = (dict["skips"] as? NSNumber)?.intValue ?? 0
             if skips > self.lastAdSkipCount {
                 NSLog("[FloatVideo] Auto-skipped ad (total \(skips))")
@@ -1777,20 +3610,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                 self.lastAdFFCount = ff
             }
 
-            // Self-healing: a full in-page navigation (autoplay-next, reload)
-            // wipes the JS world while Swift-side state blocks re-injection in
-            // didFinish. Re-install the ad-skip guard whenever the page reports
-            // it missing. Same philosophy as the mute-intent reconciliation below.
             let adSkipInstalled = dict["adSkipInstalled"] as? Bool ?? true
             if !adSkipInstalled, self.currentSite == "youtube",
                self.loadingStrategy == .fullPageInject {
                 self.injectAdSkip()
             }
 
-            // Trusted click: the in-page guard published the skip button's
-            // center; press it with a real mouse event. Only honor requests
-            // whose same-poll snapshot still shows an ad, so a click can never
-            // land on content after the ad ended between guard tick and poll.
             if let tc = dict["tc"] as? [String: Any],
                (dict["ads"] as? Bool) == true,
                let px = (tc["x"] as? NSNumber)?.doubleValue,
@@ -1799,32 +3624,60 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             }
 
             // Update progress bar
-            if dur > 0 {
+            if dur > 0 && !dur.isNaN {
                 let fraction = CGFloat(ct / dur)
-                self.progressPlayed.frame.size.width = self.progressBg.frame.width * fraction
+                self.scrubberView?.setProgress(fraction)
+                self.timeLabel.stringValue = "\(self.formatTime(ct)) / \(self.formatTime(dur))"
+            } else {
+                self.scrubberView?.setProgress(0)
+                if self.loadingOverlay != nil {
+                    self.timeLabel.stringValue = "Đang tải..."
+                } else if ct > 0 {
+                    self.timeLabel.stringValue = self.formatTime(ct)
+                } else {
+                    self.timeLabel.stringValue = "--:--"
+                }
             }
-            // Update time label
-            self.timeLabel.stringValue = "\(self.formatTime(ct)) / \(self.formatTime(dur))"
-            // Sync play state (observed)
-            self.isPlaying = !paused
-            self.setButtonSymbol(self.playPauseButton, paused ? "play.fill" : "pause.fill")
 
-            // Mute/volume: UI reflects user INTENT, not the observed state.
-            // If observed drifts from intent (YouTube re-mutes after an ad, audio
-            // session interruption, etc.) re-assert intent on the page. Self-healing.
+            // Sync play state
+            self.isPlaying = !paused
+            self.playbackElapsed = ct
+            self.playbackDuration = dur
+            self.handleWatchAssist(currentTime: ct, duration: dur, paused: paused)
+            self.setButtonSymbol(self.playPauseButton, paused ? "play.fill" : "pause.fill")
+            VibeNowPlaying.update(
+                title: self.videoTitle,
+                elapsed: ct,
+                duration: dur,
+                playing: !paused,
+                rate: self.playbackRate
+            )
+            if !paused {
+                self.emitProgress(force: false)
+            }
+
+            // Mute/volume reconciliation — never force 1.0 while ducked
             let desiredMuted = self.userWantsMute
             self.setButtonSymbol(self.volumeButton, desiredMuted ? "speaker.slash.fill" : "speaker.wave.2.fill")
             if desiredMuted {
                 self.volumeSlider.doubleValue = 0
                 if !muted {
-                    self.videoJS("v.muted = true", youtubeCmd: "playerCommand('mute')")
+                    self.videoJS("v.muted = true", youtubeCmd: "playerCommand('mute')", jwAction: "jw.setMute(true)")
+                }
+            } else if self.isDucked {
+                let duckedVol = self.volumeSlider?.doubleValue ?? max(0.05, self.preDuckVolume * 0.2)
+                self.volumeSlider.doubleValue = duckedVol
+                if muted || abs(vol - duckedVol) > 0.08 {
+                    self.videoJS("v.muted = false; v.volume = \(duckedVol)",
+                                 youtubeCmd: "playerCommand('unmute'); playerCommand('volume', \(duckedVol))",
+                                 jwAction: "jw.setMute(false); jw.setVolume(\(Int(duckedVol * 100)))")
                 }
             } else {
-                // Keep the slider visually pinned away from 0 while the user wants audio
                 self.volumeSlider.doubleValue = max(vol, 0.01)
                 if muted || vol == 0 {
                     self.videoJS("v.muted = false; v.volume = 1.0",
-                                 youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)")
+                                 youtubeCmd: "playerCommand('unmute'); playerCommand('volume', 1.0)",
+                                 jwAction: "jw.setMute(false); jw.setVolume(100)")
                 }
             }
         }
@@ -1841,11 +3694,555 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
     }
 
     @objc func toggleOpacity() {
-        if self.alphaValue < 1.0 {
-            self.alphaValue = 1.0
+        // Cycle: full → soft (coding) → dim → full
+        let current = self.alphaValue
+        if current > 0.9 {
+            self.alphaValue = 0.72
+        } else if current > 0.58 {
+            self.alphaValue = 0.45
         } else {
-            self.alphaValue = 0.6
+            self.alphaValue = 1.0
         }
+        if !isGhostMode {
+            preGhostAlpha = self.alphaValue
+        }
+        UserDefaults.standard.set(Double(self.alphaValue), forKey: Self.opacityPrefKey)
+    }
+
+    @objc func play() {
+        if !isPlaying { togglePlayPause() }
+    }
+
+    @objc func pause() {
+        if isPlaying { togglePlayPause() }
+    }
+
+    @objc func duckVolume() {
+        if !isDucked {
+            preDuckVolume = volumeSlider?.doubleValue ?? 1.0
+            let ducked = max(0.05, preDuckVolume * 0.2)
+            volumeSlider?.doubleValue = ducked
+            if let slider = volumeSlider { volumeChanged(slider) }
+            isDucked = true
+            showHUD("Đã hạ tiếng (duck)")
+            NSLog("[FloatVideo] Audio ducked to 20% for AI review")
+        }
+    }
+
+    @objc func unduckVolume() {
+        if isDucked {
+            volumeSlider?.doubleValue = preDuckVolume
+            if let slider = volumeSlider { volumeChanged(slider) }
+            isDucked = false
+            showHUD("Khôi phục âm lượng")
+            NSLog("[FloatVideo] Audio restored to 100%")
+        }
+    }
+
+    private func applyPreferredGhostOnOpen() {
+        setGhostMode(Self.preferredGhostMode, persist: false)
+        if let saved = UserDefaults.standard.object(forKey: Self.opacityPrefKey) as? Double {
+            // Ignore near-invisible saved values that make the player seem "gone".
+            setOpacity(max(0.5, saved))
+        }
+    }
+
+    /// Solid opacity for a clickable player — never the coding-safe / ghost soft values.
+    private static func preferredSolidOpacity(fallback: CGFloat) -> CGFloat {
+        if let saved = UserDefaults.standard.object(forKey: opacityPrefKey) as? Double {
+            let v = CGFloat(saved)
+            if v >= 0.9 { return min(1.0, v) }
+        }
+        if fallback >= 0.9 { return min(1.0, fallback) }
+        return 1.0
+    }
+
+    func setGhostMode(_ enabled: Bool, persist: Bool = true) {
+        isGhostMode = enabled
+        // Only the video window passes clicks through. The control strip stays live.
+        self.ignoresMouseEvents = enabled
+        if enabled {
+            if self.alphaValue > 0.9 {
+                preGhostAlpha = 1.0
+                self.alphaValue = 0.72
+            } else {
+                preGhostAlpha = max(self.alphaValue, 0.45)
+            }
+            if let stripGhostButton { setButtonSymbol(stripGhostButton, "eye.slash") }
+            stripGhostButton?.toolTip = "Đang xuyên chuột — click xuyên vào editor (⌘⇧G)"
+        } else {
+            // User wants a solid, clickable picture. Restore full/preferred opacity —
+            // do not leave coding-safe washout (~0.55) even if layout stays shrunk.
+            let solid = Self.preferredSolidOpacity(fallback: preGhostAlpha)
+            self.alphaValue = solid
+            preGhostAlpha = solid
+            if let stripGhostButton { setButtonSymbol(stripGhostButton, "eye") }
+            stripGhostButton?.toolTip = "Xuyên chuột — bấm xuyên phim để gõ code (⌘⇧G)"
+            // Keep isCodingSafeMode for size/placement; opacity follows ghost preference.
+        }
+        mountControlStrip()
+        syncControlStrip(animated: false)
+        if persist {
+            Self.setPreferredGhostMode(enabled)
+        }
+    }
+
+    @objc func toggleGhostMode() {
+        setGhostMode(!isGhostMode, persist: true)
+    }
+
+    /// No clear pocket over the IDE — shrink, soften, park in least-bad corner.
+    /// Suggests ghost only on enter when preferredGhostMode is true; never re-forces
+    /// ghost on later dock ticks so a manual OFF stays OFF.
+    func applyCodingSafeMode(preferred: NSRect) {
+        let entering = !isCodingSafeMode
+        if entering {
+            preSafeFrame = frame
+            preSafeAlpha = alphaValue
+            // Suggest click-through once when entering, only if user still prefers it.
+            if Self.preferredGhostMode && !isGhostMode {
+                setGhostMode(true, persist: false)
+            }
+        }
+        isCodingSafeMode = true
+        // Soft dim only while ghost/click-through is on. If the user turned ghost
+        // OFF for a solid player, keep coding-safe size/placement but do not re-wash.
+        if isGhostMode && alphaValue > 0.6 {
+            animator().alphaValue = 0.55
+        }
+
+        // On first enter, shrink toward a coding-safe width. Later ticks only
+        // reposition — never undo a manual +/- or strip-edge resize.
+        let codingCap = max(minSize.width, 380)
+        var targetW = entering
+            ? min(max(preferred.width, minSize.width), codingCap)
+            : max(frame.width, minSize.width)
+        var targetH = targetW / videoAspectRatio
+        if let screen = screen ?? NSScreen.main {
+            let vis = screen.visibleFrame
+            let maxH = max(minSize.height, vis.height * 0.34)
+            if targetH > maxH {
+                targetH = maxH
+                targetW = targetH * videoAspectRatio
+            }
+            var frame = NSRect(
+                x: preferred.midX - targetW / 2,
+                y: preferred.midY - targetH / 2,
+                width: targetW,
+                height: targetH
+            )
+            // Prefer the upper corners so the caret/input band stays free.
+            let corners = [
+                NSPoint(x: vis.maxX - targetW - 14, y: vis.maxY - targetH - 14),
+                NSPoint(x: vis.minX + 14, y: vis.maxY - targetH - 14),
+                NSPoint(x: vis.maxX - targetW - 14, y: vis.minY + VibePlacer.stripHeight + 20),
+                NSPoint(x: vis.minX + 14, y: vis.minY + VibePlacer.stripHeight + 20),
+            ]
+            let obstacles = vibeDock.liveObstacles(on: vis)
+            let ranked = corners.map { origin -> (NSRect, CGFloat) in
+                let candidate = NSRect(origin: origin, size: NSSize(width: targetW, height: targetH))
+                let foot = VibePlacer.footprint(video: candidate, screen: vis)
+                let overlap = obstacles.reduce(CGFloat(0)) { sum, o in
+                    sum + max(0, foot.intersection(o.frame.insetBy(dx: -o.pad, dy: -o.pad)).width)
+                        * max(0, foot.intersection(o.frame.insetBy(dx: -o.pad, dy: -o.pad)).height)
+                        * o.weight
+                }
+                return (candidate, -overlap)
+            }.sorted { $0.1 > $1.1 }
+            frame = ranked.first?.0 ?? frame
+            applyDock(videoFrame: frame, animated: true)
+        } else {
+            applyDock(videoFrame: preferred, animated: true)
+        }
+        if entering {
+            showHUD("Coding-safe — thu nhỏ để chừa chỗ gõ")
+            NSLog("[FloatVideo] Coding-safe mode: shrink + soft opacity (ghost preferred=\(Self.preferredGhostMode))")
+        }
+    }
+
+    func exitCodingSafeModeIfClear() {
+        guard isCodingSafeMode else { return }
+        isCodingSafeMode = false
+        let restore = preSafeFrame
+        preSafeFrame = .zero
+        if restore.width >= minSize.width && restore.height >= minSize.height {
+            applyDock(videoFrame: restore, animated: true)
+        }
+        // Keep ghost preference; restore opacity — solid when ghost is off.
+        if isGhostMode {
+            if let saved = UserDefaults.standard.object(forKey: Self.opacityPrefKey) as? Double {
+                animator().alphaValue = CGFloat(max(0.45, saved))
+            } else {
+                animator().alphaValue = max(preSafeAlpha, 0.72)
+            }
+        } else {
+            animator().alphaValue = Self.preferredSolidOpacity(fallback: preSafeAlpha)
+        }
+        showHUD("Đã phóng lại kích thước trước")
+    }
+
+    @objc func togglePin() {
+        isPinned.toggle()
+        (titleBarView as? DraggableTitleBar)?.isLocked = isPinned
+        pinButton?.alphaValue = isPinned ? 1 : 0.45
+        pinButton?.toolTip = isPinned ? "Đang ghim — bấm để tự né lại" : "Ghim vị trí — không tự né cửa sổ code"
+        if !isPinned { vibeDock.attach(self) }
+    }
+
+    @objc func toggleDuck() {
+        if isDucked { unduckVolume() } else { duckVolume() }
+        if let stripDuckButton {
+            setButtonSymbol(stripDuckButton, isDucked ? "speaker.wave.1.fill" : "speaker.wave.2.fill")
+            stripDuckButton.contentTintColor = isDucked ? NSColor(red: 1, green: 0.23, blue: 0.36, alpha: 1) : .white
+        }
+    }
+
+    // MARK: - HUD / Progress / Episodes
+
+    func showHUD(_ message: String, duration: TimeInterval = 1.6) {
+        guard let hud = hudLabel else {
+            NSLog("[FloatVideo] HUD: \(message)")
+            return
+        }
+        hud.stringValue = "  \(message)  "
+        hud.isHidden = false
+        if let container = contentView {
+            let width = min(container.bounds.width - 24, max(160, CGFloat(message.count) * 7.5 + 28))
+            hud.frame = NSRect(
+                x: (container.bounds.width - width) / 2,
+                y: container.bounds.height / 2 - 14,
+                width: width,
+                height: 28
+            )
+        }
+        hud.alphaValue = 0
+        NSAnimationContext.runAnimationGroup({ ctx in
+            ctx.duration = 0.15
+            hud.animator().alphaValue = 1
+        })
+        hudHideWorkItem?.cancel()
+        let work = DispatchWorkItem { [weak self] in
+            guard let hud = self?.hudLabel else { return }
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.25
+                hud.animator().alphaValue = 0
+            }, completionHandler: {
+                hud.isHidden = true
+            })
+        }
+        hudHideWorkItem = work
+        DispatchQueue.main.asyncAfter(deadline: .now() + duration, execute: work)
+    }
+
+    func emitProgress(force: Bool) {
+        guard movieContext != nil || playbackElapsed > 0 else { return }
+        let now = Date()
+        if !force, now.timeIntervalSince(lastProgressSentAt) < progressHeartbeatInterval {
+            return
+        }
+        lastProgressSentAt = now
+        let payload = progressPayload()
+        guard !payload.isEmpty else { return }
+        onProgress?(payload)
+    }
+
+    func progressPayload() -> [String: Any] {
+        var payload: [String: Any] = [
+            "type": "PROGRESS",
+            "currentTime": playbackElapsed,
+            "duration": playbackDuration,
+        ]
+        if let ctx = movieContext {
+            payload["slug"] = ctx.slug
+            payload["name"] = ctx.name
+            payload["source"] = ctx.source
+            payload["poster"] = ctx.poster
+            payload["serverIdx"] = ctx.serverIdx
+            payload["epIdx"] = ctx.epIdx
+            if let ep = ctx.currentEpisode {
+                payload["epName"] = ep.name
+                payload["epSlug"] = ep.slug
+                payload["linkM3u8"] = ep.linkM3u8
+                payload["linkEmbed"] = ep.linkEmbed
+            }
+        } else {
+            payload["name"] = videoTitle
+            payload["linkEmbed"] = currentEmbedUrl ?? ""
+            payload["linkM3u8"] = ""
+        }
+        return payload
+    }
+
+    private func updateEpisodeButtons() {
+        let hasNav = movieContext?.hasPlaylist == true
+        stripPrevEpisodeButton?.isHidden = !hasNav
+        stripNextEpisodeButton?.isHidden = !hasNav
+        if let ctx = movieContext, let server = ctx.servers[safe: ctx.serverIdx] {
+            stripPrevEpisodeButton?.isEnabled = ctx.epIdx > 0
+            stripNextEpisodeButton?.isEnabled = ctx.epIdx + 1 < server.items.count
+        }
+        layoutControlBar()
+    }
+
+    @objc func prevEpisode() {
+        switchEpisode(by: -1)
+    }
+
+    @objc func nextEpisode() {
+        switchEpisode(by: 1)
+    }
+
+    @discardableResult
+    func switchEpisode(by delta: Int) -> Bool {
+        guard var ctx = movieContext else {
+            showHUD("Không có danh sách tập")
+            return false
+        }
+        guard let ep = ctx.moveEpisode(by: delta) else {
+            showHUD(delta < 0 ? "Đã ở tập đầu" : "Hết mùa / hết danh sách")
+            return false
+        }
+        movieContext = ctx
+        reloadEpisode(ep, context: ctx)
+        return true
+    }
+
+    private func reloadEpisode(_ ep: MovieEpisodeItem, context: MovieContext) {
+        emitProgress(force: true)
+        videoTitle = context.name.isEmpty ? ep.name : "\(context.name) — \(ep.name)"
+        titleLabel?.stringValue = videoTitle
+        currentVideoTime = 0
+        playbackElapsed = 0
+        playbackDuration = 0
+        hasInjectedJS = false
+        resetEpisodeWatchAssistState()
+        updateEpisodeButtons()
+        refreshWatchAssistButtonStyles()
+        showHUD(ep.name)
+
+        let m3u8 = ep.linkM3u8
+        let embed = ep.linkEmbed
+        let pageURL = !embed.isEmpty ? embed : currentPageURL
+        loadVideo(
+            url: pageURL,
+            videoSrc: m3u8.isEmpty ? nil : m3u8,
+            embedUrl: embed.isEmpty ? nil : embed,
+            currentTime: 0,
+            site: currentSite == "generic" || currentSite.isEmpty ? "movie" : currentSite,
+            httpServerPortProvider: httpServerPortProvider,
+            cookies: [],
+            playerPrefs: playerPrefs
+        )
+        // Episode change itself is a progress checkpoint (time 0 on new ep).
+        DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
+            self?.emitProgress(force: true)
+        }
+    }
+
+    @objc func showOverflowMenu(_ sender: NSButton) {
+        let menu = NSMenu(title: "More")
+        func item(_ title: String, action: Selector) -> NSMenuItem {
+            let it = NSMenuItem(title: title, action: action, keyEquivalent: "")
+            it.target = self
+            return it
+        }
+        menu.addItem(item("Tua −10 giây", action: #selector(skipBackward)))
+        menu.addItem(item("Tua +10 giây", action: #selector(skipForward)))
+        menu.addItem(item(userWantsMute ? "Bật tiếng" : "Tắt tiếng", action: #selector(toggleMute)))
+        menu.addItem(item("Tốc độ phát", action: #selector(cyclePlaybackRate)))
+        menu.addItem(item(isMaximized ? "Khôi phục kích thước" : "Phóng tối đa", action: #selector(toggleMaximize)))
+        menu.addItem(NSMenuItem.separator())
+        menu.addItem(item(SizePreset.mini.menuTitle, action: #selector(applySizePresetMini)))
+        menu.addItem(item(SizePreset.standard.menuTitle, action: #selector(applySizePresetStandard)))
+        menu.addItem(item(SizePreset.wide.menuTitle, action: #selector(applySizePresetWide)))
+        menu.addItem(item(SizePreset.pocket.menuTitle, action: #selector(applySizePresetPocket)))
+        menu.addItem(item("Phóng to (+)", action: #selector(growWindow)))
+        menu.addItem(item("Thu nhỏ (−)", action: #selector(shrinkWindow)))
+        if movieContext != nil {
+            menu.addItem(NSMenuItem.separator())
+            let autoNextTitle = Self.preferredAutoNextEpisode ? "✓ Tập sau tự động" : "Tập sau tự động"
+            menu.addItem(item(autoNextTitle, action: #selector(toggleAutoNextEpisode)))
+            let autoIntroTitle = Self.preferredAutoSkipIntro ? "✓ Tự bỏ qua giới thiệu" : "Tự bỏ qua giới thiệu"
+            menu.addItem(item(autoIntroTitle, action: #selector(toggleAutoSkipIntro)))
+            menu.addItem(item("Bỏ qua GT ngay", action: #selector(manualSkipIntro)))
+        }
+        if movieContext?.hasPlaylist == true {
+            menu.addItem(NSMenuItem.separator())
+            menu.addItem(item("Tập trước", action: #selector(prevEpisode)))
+            menu.addItem(item("Tập sau", action: #selector(nextEpisode)))
+        }
+        let point = NSPoint(x: sender.bounds.midX, y: sender.bounds.minY - 2)
+        menu.popUp(positioning: nil, at: point, in: sender)
+    }
+
+    @objc func setOpacity(_ val: Double) {
+        let clamped = max(0.15, min(1.0, CGFloat(val)))
+        self.animator().alphaValue = clamped
+        if !isGhostMode { preGhostAlpha = clamped }
+    }
+
+    @objc func toggleBossHide() {
+        if isWindowVisible {
+            emitProgress(force: true)
+            hideTimer?.cancel()
+            hideTimer = nil
+            if isPlaying {
+                pause()
+                pausedForBoss = true
+            } else {
+                pausedForBoss = false
+            }
+            controlStrip?.orderOut(nil)
+            self.orderOut(nil)
+            isWindowVisible = false
+            isHovering = false
+        } else {
+            self.orderFrontRegardless()
+            isWindowVisible = true
+            syncControlStrip(animated: false)
+            showControls()
+            scheduleHideControls(after: Self.chromeHideDelay)
+            if pausedForBoss {
+                play()
+                pausedForBoss = false
+            }
+        }
+    }
+
+    func applyDock(videoFrame: NSRect, animated: Bool) {
+        let reduced = NSWorkspace.shared.accessibilityDisplayShouldReduceMotion
+        if animated && !reduced {
+            NSAnimationContext.runAnimationGroup({ ctx in
+                ctx.duration = 0.32
+                ctx.timingFunction = CAMediaTimingFunction(name: .easeOut)
+                self.animator().setFrame(videoFrame, display: true)
+            }, completionHandler: { [weak self] in
+                self?.syncControlStrip(animated: false)
+            })
+        } else {
+            setFrame(videoFrame, display: true)
+            syncControlStrip(animated: false)
+        }
+    }
+
+    func syncControlStrip(animated: Bool) {
+        guard let strip = controlStrip else { return }
+        let target = predictedStripFrame(for: frame)
+        if animated {
+            strip.animator().setFrame(target, display: true)
+        } else {
+            strip.setFrame(target, display: true)
+        }
+        if isWindowVisible { strip.orderFrontRegardless() }
+        layoutControlBar()
+    }
+
+    private func predictedStripFrame(for video: NSRect) -> NSRect {
+        let screen = self.screen?.visibleFrame ?? NSScreen.main?.visibleFrame ?? video
+        return VibePlacer.stripFrame(video: video, screen: screen)
+    }
+
+    private func mountControlStrip() {
+        guard let bar = controlBarView else { return }
+        if controlStrip != nil {
+            syncControlStrip(animated: false)
+            return
+        }
+        bar.removeFromSuperview()
+        let panel = ControlStripPanel(
+            contentRect: NSRect(x: 0, y: 0, width: frame.width, height: VibePlacer.stripHeight),
+            styleMask: [.borderless, .nonactivatingPanel, .utilityWindow],
+            backing: .buffered,
+            defer: false
+        )
+        panel.owner = self
+        panel.level = NSWindow.Level(rawValue: Int(CGWindowLevelForKey(.maximumWindow)) + 2)
+        panel.collectionBehavior = [.canJoinAllSpaces, .fullScreenAuxiliary, .stationary]
+        panel.isFloatingPanel = true
+        panel.hidesOnDeactivate = false
+        panel.isOpaque = false
+        panel.backgroundColor = .clear
+        panel.hasShadow = true
+        panel.isMovable = false
+        panel.ignoresMouseEvents = false
+        panel.acceptsMouseMovedEvents = true
+        bar.frame = panel.contentView?.bounds ?? NSRect(x: 0, y: 0, width: frame.width, height: VibePlacer.stripHeight)
+        bar.autoresizingMask = [.width, .height]
+        bar.alphaValue = 1
+        bar.isHidden = false
+        panel.contentView = bar
+        // Tracking so mouseMoved delivers edge cursors on the strip.
+        if let content = panel.contentView {
+            let tracking = NSTrackingArea(
+                rect: content.bounds,
+                options: [.mouseEnteredAndExited, .mouseMoved, .activeAlways, .inVisibleRect],
+                owner: panel,
+                userInfo: nil
+            )
+            content.addTrackingArea(tracking)
+        }
+        controlStrip = panel
+        syncControlStrip(animated: false)
+        layoutVideoChrome()
+    }
+
+    private func layoutVideoChrome() {
+        guard let container = contentView, let webView = webView else { return }
+        let bounds = container.bounds
+        // Controls live on the external strip — video uses the full panel.
+        webView.frame = bounds
+        loadingOverlay?.frame = webView.frame
+        if titleBarView != nil {
+            let titleH = titleBarView.frame.height > 0 ? titleBarView.frame.height : 30
+            titleBarView.frame = NSRect(x: 0, y: bounds.height - titleH, width: bounds.width, height: titleH)
+        }
+    }
+
+    func trackMoveFromStrip() {
+        guard !isPinned, let strip = controlStrip else { return }
+        autoDockPaused = true
+        let startMouse = NSEvent.mouseLocation
+        let startOrigin = frame.origin
+        strip.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { [weak self] event, stop in
+            guard let self = self, let event = event else { return }
+            if event.type == .leftMouseUp {
+                stop.pointee = true
+                return
+            }
+            let mouse = NSEvent.mouseLocation
+            self.setFrameOrigin(NSPoint(
+                x: startOrigin.x + mouse.x - startMouse.x,
+                y: startOrigin.y + mouse.y - startMouse.y
+            ))
+            self.syncControlStrip(animated: false)
+        }
+        autoDockPaused = false
+        vibeDock.noteUserDidPlace()
+        saveWindowFrame()
+    }
+
+    func trackResizeFromStrip() {
+        guard let strip = controlStrip else { return }
+        noteStripInteraction()
+        autoDockPaused = true
+        isResizing = true
+        initialMouseLocation = NSEvent.mouseLocation
+        initialWindowFrame = frame
+        resizeEdge = NSEvent.mouseLocation.x > frame.midX ? .right : .left
+        strip.trackEvents(matching: [.leftMouseDragged, .leftMouseUp], timeout: .infinity, mode: .eventTracking) { [weak self] event, stop in
+            guard let self = self, let event = event else { return }
+            if event.type == .leftMouseUp {
+                stop.pointee = true
+                return
+            }
+            self.mouseDragged(with: event)
+        }
+        isResizing = false
+        resizeEdge = .none
+        autoDockPaused = false
+        vibeDock.noteUserDidPlace()
+        saveWindowFrame()
+        scheduleHideControlsIfPointerLeft(after: Self.chromeHideDelay)
     }
 
     // MARK: - Resize Edge Detection
@@ -1855,9 +4252,14 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         let h = self.frame.height
         let b = resizeBorderWidth
 
+        // The playback bar owns the bottom of the window. Don't turn it into a resize edge.
+        if isOnPlaybackBar(point), point.x >= b, point.x <= w - b {
+            return .none
+        }
+
         let onLeft = point.x < b
         let onRight = point.x > w - b
-        let onBottom = point.y < b
+        let onBottom = point.y < b && !isOnPlaybackBar(point)
         let onTop = point.y > h - b
 
         if onTop && onLeft { return .topLeft }
@@ -1889,7 +4291,18 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             // Synthetic trusted clicks (ad skip) must reach the web view even
             // when they land inside the resize border.
             if isPostingSyntheticClick { break }
+            // Pin only blocks auto-dock; allow manual edge/corner resize.
             let location = event.locationInWindow
+            if isOnPlaybackBar(location) {
+                if !playbackHitIsControl(location) {
+                    autoDockPaused = true
+                    performDrag(with: event)
+                    autoDockPaused = false
+                    vibeDock.noteUserDidPlace()
+                    return
+                }
+                break
+            }
             let edge = detectResizeEdge(at: location)
             if edge != .none {
                 // When title bar is visible, drag takes priority over top-edge resize
@@ -1897,10 +4310,14 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
                    titleBarView.frame.contains(location) {
                     break // Let DraggableTitleBar handle the drag
                 }
+                // Ghost mode passes clicks through — edge resize is unavailable on the
+                // video panel; strip L/R grips and +/- / hotkeys still resize.
+                if isGhostMode { break }
                 isResizing = true
                 resizeEdge = edge
                 initialMouseLocation = NSEvent.mouseLocation
                 initialWindowFrame = self.frame
+                showControls()
                 return
             }
         case .leftMouseDragged:
@@ -1921,16 +4338,50 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
 
     // MARK: - Mouse Handling
 
+    private func isOnPlaybackBar(_ point: NSPoint) -> Bool {
+        guard isHovering, let bar = controlBarView, !bar.isHidden, bar.superview != nil, bar.alphaValue > 0.05 else { return false }
+        return bar.frame.contains(point)
+    }
+
+    private func playbackHitIsControl(_ point: NSPoint) -> Bool {
+        guard let container = contentView, let hit = container.hitTest(point) else { return false }
+        var view: NSView? = hit
+        while let current = view {
+            if current === controlBarView { return false }
+            if current is NSControl || current is ModernScrubberView { return true }
+            view = current.superview
+        }
+        return false
+    }
+
+    private func cursorForPlaybackBar(at point: NSPoint) -> NSCursor {
+        playbackHitIsControl(point) ? .pointingHand : .openHand
+    }
+
     override func mouseMoved(with event: NSEvent) {
-        // Show/hide driven by cursor polling; only update resize cursor here.
         let location = event.locationInWindow
+        if isOnPlaybackBar(location) {
+            cursorForPlaybackBar(at: location).set()
+            return
+        }
+        if titleBarView.alphaValue > 0.05, titleBarView.frame.contains(location) {
+            NSCursor.openHand.set()
+            return
+        }
         let edge = detectResizeEdge(at: location)
         cursorForEdge(edge).set()
         super.mouseMoved(with: event)
     }
 
     override func mouseDown(with event: NSEvent) {
-        // Resize handled by sendEvent interception, title bar drag handled by DraggableTitleBar
+        if event.clickCount == 2 {
+            let loc = event.locationInWindow
+            let onControlBar = (controlBarView.alphaValue > 0.1 && controlBarView.frame.contains(loc))
+            if !onControlBar {
+                toggleMaximize()
+                return
+            }
+        }
         super.mouseDown(with: event)
     }
 
@@ -1965,11 +4416,15 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
             newFrame.size.height = newFrame.size.width / videoAspectRatio
         }
 
-        // Enforce minimum size
+        // Enforce min/max size while keeping aspect ratio
         let minW = self.minSize.width
+        let maxW = max(self.maxSize.width, minW)
         if newFrame.size.width < minW {
             newFrame.size.width = minW
             newFrame.size.height = minW / videoAspectRatio
+        } else if newFrame.size.width > maxW {
+            newFrame.size.width = maxW
+            newFrame.size.height = maxW / videoAspectRatio
         }
 
         // Anchor to opposite edge
@@ -1985,11 +4440,13 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         }
 
         self.setFrame(newFrame, display: true, animate: false)
+        syncControlStrip(animated: false)
     }
 
     override func mouseUp(with event: NSEvent) {
         if isResizing {
             saveWindowFrame()
+            vibeDock.noteUserDidPlace()
         }
         isResizing = false
         resizeEdge = .none
@@ -1997,11 +4454,41 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         super.mouseUp(with: event)
     }
 
+    override func mouseEntered(with event: NSEvent) {
+        hideTimer?.cancel()
+        showControls()
+        super.mouseEntered(with: event)
+    }
+
     override func mouseExited(with event: NSEvent) {
         if !isResizing {
             NSCursor.arrow.set()
         }
+        // Long idle only — short delay raced strip reveal and caused flicker.
+        if isPointerOverChrome() {
+            hideTimer?.cancel()
+            hideTimer = nil
+        } else {
+            scheduleHideControls(after: Self.chromeHideDelay)
+        }
         super.mouseExited(with: event)
+    }
+
+    override func scrollWheel(with event: NSEvent) {
+        // Option+scroll (or trackpad pinch-like vertical scroll) resizes while hovering.
+        // Works when ghost is OFF (video receives events). Ghost ON: use strip +/- or ⌃⌥=/−.
+        let wantsResize = event.modifierFlags.contains(.option)
+            || detectResizeEdge(at: event.locationInWindow) != .none
+        guard wantsResize, !isGhostMode else {
+            super.scrollWheel(with: event)
+            return
+        }
+        let delta = event.scrollingDeltaY
+        guard abs(delta) > 0.2 else { return }
+        let factor: CGFloat = delta > 0 ? 1.06 : (1.0 / 1.06)
+        adjustWindowScale(by: factor)
+        showControls()
+        scheduleHideControlsIfPointerLeft(after: Self.chromeHideDelay)
     }
 
     // Allow window to become key window + respond to first click
@@ -2012,12 +4499,63 @@ class FloatWindow: NSPanel, WKNavigationDelegate {
         set { super.acceptsMouseMovedEvents = newValue }
     }
 
-    // ESC closes the window
+    // Comprehensive keyboard shortcuts (Space, Arrows, M, F, J, K, L, Digits 0-9, ESC)
     override func keyDown(with event: NSEvent) {
-        if event.keyCode == 53 {
-            closeWindow()
-        } else {
-            super.keyDown(with: event)
+        switch event.keyCode {
+        case 53: // ESC
+            if isMaximized {
+                toggleMaximize()
+            } else {
+                closeWindow()
+            }
+        case 49, 40: // Space, K -> Play/Pause
+            togglePlayPause()
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 123, 38: // Left Arrow, J -> Rewind 10s
+            skipBackward()
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 124, 37: // Right Arrow, L -> Forward 10s
+            skipForward()
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 126: // Up Arrow -> Volume Up
+            adjustVolume(by: 0.1)
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 125: // Down Arrow -> Volume Down
+            adjustVolume(by: -0.1)
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 46: // M -> Mute
+            toggleMute()
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 3: // F -> Fullscreen / Maximize
+            toggleMaximize()
+        case 5: // G -> Ghost Mode (Click-through)
+            toggleGhostMode()
+            showControls()
+            scheduleHideControls(after: 2.0)
+        case 11: // B -> Boss Key (Hide / Show)
+            toggleBossHide()
+        case 24, 69: // = / keypad + -> grow
+            growWindow()
+            showControls()
+            scheduleHideControls(after: 1.5)
+        case 27, 78: // - / keypad - -> shrink
+            shrinkWindow()
+            showControls()
+            scheduleHideControls(after: 1.5)
+        default:
+            if let chars = event.charactersIgnoringModifiers, let digit = Int(chars), digit >= 0 && digit <= 9 {
+                seekTo(percent: Double(digit) / 10.0)
+                showControls()
+                scheduleHideControls(after: 2.0)
+            } else {
+                super.keyDown(with: event)
+            }
         }
     }
 }
