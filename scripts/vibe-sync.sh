@@ -3,6 +3,7 @@
 # Usage: ./vibe-sync.sh [play|pause|toggle|duck|unduck|ghost|boss|opacity <val>|bigger|smaller|size <w>|preset <mini|standard|wide|pocket>|autoNext [on|off]|skipIntro [on|off]|skipIntroNow|next|prev|status]
 
 PORT_FILE="$HOME/.floatvideo_port"
+TOKEN_FILE="$HOME/.floatvideo_token"
 if [ ! -f "$PORT_FILE" ]; then
     echo '{"error": "FloatVideo is not currently running. Please launch a video first."}'
     exit 1
@@ -11,6 +12,16 @@ fi
 PORT=$(cat "$PORT_FILE" | tr -d '[:space:]')
 if [ -z "$PORT" ]; then
     echo '{"error": "Invalid port in '"$PORT_FILE"'"}'
+    exit 1
+fi
+
+if [ ! -f "$TOKEN_FILE" ]; then
+    echo '{"error": "FloatVideo control token is missing. Reinstall and reopen the player."}'
+    exit 1
+fi
+TOKEN=$(cat "$TOKEN_FILE" | tr -d '[:space:]')
+if [ -z "$TOKEN" ]; then
+    echo '{"error": "Invalid FloatVideo control token."}'
     exit 1
 fi
 
@@ -54,5 +65,5 @@ case "$CMD" in
         ;;
 esac
 
-curl -s -m 2 "http://127.0.0.1:$PORT/$ENDPOINT"
+curl -s -m 2 -H "X-VibeFloat-Token: $TOKEN" "http://127.0.0.1:$PORT/$ENDPOINT"
 echo ""

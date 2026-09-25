@@ -1,11 +1,15 @@
 // content.js — Injected into video pages to detect and extract <video> elements
 (() => {
   'use strict';
+  if (globalThis.__vibeFloatDetectorLoaded) return;
+  globalThis.__vibeFloatDetectorLoaded = true;
 
   class VideoDetector {
     constructor() {
       this.detectedVideos = [];
       this.observer = null;
+      this.scanTimer = null;
+      this.lastSignature = '';
     }
 
     // Detect all <video> elements on the page
@@ -13,13 +17,13 @@
       const videos = document.querySelectorAll('video');
       this.detectedVideos = [];
 
-      videos.forEach((video, index) => {
+      videos.forEach((video) => {
         const rect = video.getBoundingClientRect();
         // Filter out videos that are too small (usually ads or preview thumbnails)
         if (rect.width < 100 || rect.height < 60) return;
 
         const info = {
-          index,
+          index: this.detectedVideos.length,
           src: this._extractSource(video),
           embedUrl: this._getEmbedUrl(),
           width: video.videoWidth || Math.round(rect.width),
@@ -156,35 +160,42 @@
       if (this.observer) return;
 
       this.observer = new MutationObserver((mutations) => {
-        let hasNewVideo = false;
+        let shouldScan = location.href !== lastUrl;
+        if (shouldScan) lastUrl = location.href;
         for (const mutation of mutations) {
           if (mutation.type === 'childList') {
-            for (const node of mutation.addedNodes) {
+            for (const node of [...mutation.addedNodes, ...mutation.removedNodes]) {
               if (node.nodeName === 'VIDEO' ||
                 (node.querySelector && node.querySelector('video'))) {
-                hasNewVideo = true;
+                shouldScan = true;
                 break;
               }
             }
           }
-          if (hasNewVideo) break;
+          if (shouldScan) break;
         }
-        if (hasNewVideo) {
-          // Delay briefly to let the video initialize
-          setTimeout(() => {
-            this.scanForVideos();
-            this._notifyBackground();
-          }, 500);
-        }
+        if (shouldScan) this.scheduleScan();
       });
 
       this.observer.observe(document.body, {
         childList: true,
         subtree: true,
       });
+      document.addEventListener('loadedmetadata', () => this.scheduleScan(), true);
+    }
+
+    scheduleScan(delay = 500) {
+      clearTimeout(this.scanTimer);
+      this.scanTimer = setTimeout(() => {
+        this.scanForVideos();
+        this._notifyBackground();
+      }, delay);
     }
 
     _notifyBackground() {
+      const signature = JSON.stringify(this.detectedVideos.map(({ index, pageUrl, src }) => [index, pageUrl, src]));
+      if (signature === this.lastSignature) return;
+      this.lastSignature = signature;
       chrome.runtime.sendMessage({
         type: 'VIDEOS_DETECTED',
         videos: this.detectedVideos,
@@ -194,6 +205,7 @@
 
   // ========== Initialization ==========
   const detector = new VideoDetector();
+  let lastUrl = location.href;
 
   // Initial scan
   const doInitialScan = () => {
@@ -206,17 +218,6 @@
 
   // SPA deferred rendering compatibility: retry scans multiple times
   setTimeout(doInitialScan, 1500);
-  setTimeout(doInitialScan, 4000);
-
-  // SPA navigation detection: rescan on URL changes (YouTube/Bilibili etc. use history.pushState)
-  let lastUrl = location.href;
-  new MutationObserver(() => {
-    if (location.href !== lastUrl) {
-      lastUrl = location.href;
-      setTimeout(doInitialScan, 800);
-      setTimeout(doInitialScan, 2500);
-    }
-  }).observe(document, { subtree: true, childList: true });
 
   // Handle messages from popup/background
   chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
@@ -228,6 +229,7 @@
 
     if (message.type === 'FLOAT_VIDEO') {
       const { videoIndex } = message;
+      detector.scanForVideos();
       const videoElements = document.querySelectorAll('video');
       // Find the corresponding visible video
       let visibleIndex = 0;
@@ -242,7 +244,7 @@
         visibleIndex++;
       }
 
-      if (targetVideo) {
+      if (targetVideo && detector.detectedVideos[videoIndex]) {
         targetVideo.pause();
         sendResponse({
           success: true,

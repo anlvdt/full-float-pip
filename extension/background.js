@@ -410,3 +410,30 @@ chrome.tabs.onUpdated.addListener((tabId, changeInfo) => {
         chrome.action.setBadgeText({ text: '', tabId });
     }
 });
+
+// One keystroke from Chrome to float the currently playing video. activeTab grants
+// access only to the tab on which the user invoked the command.
+chrome.commands.onCommand.addListener(async (command, tab) => {
+    if (command !== 'float-current-video' || !tab?.id || !/^https?:/.test(tab.url || '')) return;
+    try {
+        let response;
+        try {
+            response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
+        } catch {
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+            response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
+        }
+        const videos = response?.videos || [];
+        const video = videos.find(v => !v.paused) || videos[0];
+        if (!video) throw new Error('No visible video');
+        const result = await manager.floatVideo(video, null);
+        if (!result?.success) throw new Error(result?.error || 'Unable to open player');
+        await chrome.tabs.sendMessage(tab.id, { type: 'FLOAT_VIDEO', videoIndex: video.index }).catch(() => {});
+        await chrome.action.setTitle({ tabId: tab.id, title: 'VibeFloat · Đang phát nổi' });
+    } catch (error) {
+        console.warn('[FloatVideo] Shortcut failed:', error);
+        await chrome.action.setBadgeBackgroundColor({ tabId: tab.id, color: '#d92d50' });
+        await chrome.action.setBadgeText({ tabId: tab.id, text: '!' });
+        await chrome.action.setTitle({ tabId: tab.id, title: `VibeFloat · ${error.message}` });
+    }
+});

@@ -757,7 +757,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
     init(videoWidth: CGFloat, videoHeight: CGFloat, videoTitle: String) {
         self.videoTitle = videoTitle
 
-        let titleBarHeight: CGFloat = 30
+        let titleBarHeight: CGFloat = 36
         let windowWidth = max(videoWidth, 320)
         let windowHeight = max(videoHeight, 180)
 
@@ -843,11 +843,12 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         titleEffect.material = .hudWindow
         titleEffect.blendingMode = .withinWindow
         titleEffect.state = .active
+        titleEffect.appearance = NSAppearance(named: .darkAqua)
         titleBarView.addSubview(titleEffect, positioned: .below, relativeTo: nil)
 
         // Close button (red)
         let closeBtn = createCircleButton(
-            frame: NSRect(x: 10, y: 8, width: 14, height: 14),
+            frame: NSRect(x: 10, y: 8, width: 20, height: 20),
             color: NSColor(red: 1.0, green: 0.38, blue: 0.35, alpha: 1.0),
             action: #selector(closeWindow)
         )
@@ -855,7 +856,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
         // Opacity button (yellow)
         let miniBtn = createCircleButton(
-            frame: NSRect(x: 30, y: 8, width: 14, height: 14),
+            frame: NSRect(x: 38, y: 8, width: 20, height: 20),
             color: NSColor(red: 1.0, green: 0.82, blue: 0.28, alpha: 1.0),
             action: #selector(toggleOpacity)
         )
@@ -863,7 +864,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
         // Pin (green) — locks position and pauses auto-dock
         let zoomBtn = createCircleButton(
-            frame: NSRect(x: 50, y: 8, width: 14, height: 14),
+            frame: NSRect(x: 66, y: 8, width: 20, height: 20),
             color: NSColor(red: 0.27, green: 0.85, blue: 0.46, alpha: 1.0),
             action: #selector(togglePin)
         )
@@ -873,7 +874,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
         // Ghost Mode button (purple / click-through)
         let ghostBtn = createCircleButton(
-            frame: NSRect(x: 70, y: 8, width: 14, height: 14),
+            frame: NSRect(x: 94, y: 8, width: 20, height: 20),
             color: NSColor(red: 0.68, green: 0.45, blue: 0.98, alpha: 1.0),
             action: #selector(toggleGhostMode)
         )
@@ -884,8 +885,8 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
 
         // Title text
         titleLabel = NSTextField(frame: NSRect(
-            x: 92, y: 5,
-            width: max(60, width - 102), height: 20
+            x: 126, y: 8,
+            width: max(60, width - 138), height: 20
         ))
         titleLabel.stringValue = videoTitle
         titleLabel.isEditable = false
@@ -893,7 +894,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         titleLabel.drawsBackground = false
         titleLabel.backgroundColor = .clear
         titleLabel.textColor = NSColor(white: 0.92, alpha: 1.0)
-        titleLabel.font = NSFont.systemFont(ofSize: 11, weight: .semibold)
+        titleLabel.font = NSFont.systemFont(ofSize: 12, weight: .semibold)
         titleLabel.lineBreakMode = .byTruncatingMiddle
         titleLabel.maximumNumberOfLines = 1
         titleLabel.autoresizingMask = [.width]
@@ -983,6 +984,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         controlEffect.material = .hudWindow
         controlEffect.blendingMode = .withinWindow
         controlEffect.state = .active
+        controlEffect.appearance = NSAppearance(named: .darkAqua)
         controlBarView.addSubview(controlEffect, positioned: .below, relativeTo: nil)
 
         // Modern Scrubber (timeline track + knob)
@@ -1142,7 +1144,7 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         hud.alphaValue = 0
         hud.isHidden = true
         hud.autoresizingMask = [.minXMargin, .maxXMargin, .minYMargin]
-        container.addSubview(hud, positioned: .above, relativeTo: webView)
+        container.addSubview(hud)
         hudToast = hud
 
         // Hide title bar by default (PiP-style: shown on hover)
@@ -3041,6 +3043,11 @@ class FloatWindow: NSPanel, WKNavigationDelegate, WKUIDelegate, WKScriptMessageH
         self.orderFrontRegardless()
         showControls()
         scheduleHideControls(after: Self.chromeHideDelay)
+        let controlsHintKey = "FloatVideoDidShowControlsHint"
+        if !UserDefaults.standard.bool(forKey: controlsHintKey) {
+            UserDefaults.standard.set(true, forKey: controlsHintKey)
+            showHUD("Di chuột vào video để hiện điều khiển", duration: 3.2)
+        }
         // Force another front pass after AppKit settles collection/space membership.
         DispatchQueue.main.async { [weak self] in
             guard let self = self else { return }

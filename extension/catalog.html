@@ -12,11 +12,7 @@
     <header class="navbar">
       <div class="nav-left">
         <div class="brand-icon">
-          <svg width="22" height="22" viewBox="0 0 24 24" fill="none" aria-hidden="true">
-            <rect x="2.2" y="5" width="14" height="9.2" rx="2" stroke="currentColor" stroke-width="1.7"/>
-            <path d="M5.2 7.5h8" stroke="currentColor" stroke-width="1.2" stroke-linecap="round" opacity="0.45"/>
-            <path d="M7.1 12.2 L10.6 10.2 L7.1 8.2 Z" fill="#ff4d6a"/>
-          </svg>
+          <img src="icons/icon128.png" width="32" height="32" alt="">
         </div>
         <div class="brand-text">
           <h1>VibeFloat</h1>
@@ -98,8 +94,8 @@
     </nav>
 
     <!-- Cinema Hero Spotlight Banner -->
-    <section id="hero-spotlight" class="hero-spotlight hidden">
-      <div class="hero-backdrop" id="hero-backdrop"></div>
+    <section id="hero-spotlight" class="hero-spotlight hidden" aria-label="Phim nổi bật">
+      <img class="hero-backdrop" id="hero-backdrop" alt="" fetchpriority="high" decoding="async">
       <div class="hero-gradient-overlay"></div>
       <div class="hero-content">
         <div class="hero-badges" id="hero-badges">
@@ -112,10 +108,10 @@
         <p id="hero-desc" class="hero-desc">Mô tả tóm tắt phim chiếu rạp với nội dung hấp dẫn...</p>
         <div class="hero-actions">
           <button id="hero-float-btn" class="hero-btn hero-btn-primary" type="button" title="Phát nổi — cửa sổ tự né vùng code. Tập sau tự động / Bỏ qua GT trong PiP.">
-            Phát nổi
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="currentColor" aria-hidden="true"><path d="m7 3 14 9-14 9V3Z"/></svg> Phát nổi
           </button>
           <button id="hero-detail-btn" class="hero-btn hero-btn-secondary" type="button">
-            Chi tiết
+            <svg width="20" height="20" viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" aria-hidden="true"><circle cx="12" cy="12" r="9"/><path d="M12 11v5m0-8h.01"/></svg> Thông tin
           </button>
           <button id="hero-fav-btn" class="hero-btn hero-btn-ghost" title="Thêm vào danh sách của tôi" type="button" aria-pressed="false">
             + Danh sách

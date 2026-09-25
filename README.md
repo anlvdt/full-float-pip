@@ -38,6 +38,8 @@ With FullFloatPiP:
 3. Switch to your fullscreen Terminal / VS Code / Cursor / Xcode
 4. The video stays floating in the corner — always visible, always on top
 
+For a video already playing in the active Chrome tab, press **⌃⇧Y** (Control–Shift–Y on macOS) to float it directly. The popup shows the shortcut Chrome has actually assigned. You can change it at `chrome://extensions/shortcuts`.
+
 No window switching. No split screen. No leaving fullscreen. Just code and video, together.
 
 ## Features
@@ -47,6 +49,8 @@ No window switching. No split screen. No leaving fullscreen. Just code and video
 - **PiP-Style UI** — Clean, borderless video window; controls appear on hover
 - **YouTube-Style Control Bar** — Play/pause, skip 10s, volume slider, progress bar with seek, time display
 - **Auto Video Detection** — Badge shows video count; auto-detects SPA navigation (YouTube, Bilibili)
+- **Quick Float Shortcut** — Float the active tab's playing video without opening the popup
+- **Last-used Popup Tab** — Opens where you left off; movie data loads only when you visit the catalog
 - **Aspect Ratio Lock** — Window maintains video aspect ratio during resize
 - **Position Memory** — Remembers window position and size between sessions
 - **Drag & Resize** — Drag from title bar, resize from any edge/corner
@@ -163,6 +167,8 @@ Chrome's built-in Picture-in-Picture uses the browser's own window management. O
 - **Cookie Sharing** — The floating window doesn't share login state with Chrome; some sites may require re-login
 - **macOS Only** — Requires macOS 12+ and a native Swift companion app; not available on Windows/Linux
 
+The local `scripts/vibe-sync.sh` control tool reads a private token from `~/.floatvideo_token` while the player is running. Reinstall the native companion to use this version of the tool; direct HTTP calls to `/api/` now require the `X-VibeFloat-Token` header.
+
 ## Uninstall
 
 ```bash
@@ -179,4 +185,3 @@ MIT
 ## Contributing
 
 Issues and pull requests are welcome. Please open an issue first to discuss significant changes.
-

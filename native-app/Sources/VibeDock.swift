@@ -268,13 +268,14 @@ final class VibeDock {
         if window.isPinned || window.autoDockPaused || window.isResizeActive { return }
         let obstacles = scanWeightedObstacles()
         if shouldHold(against: obstacles) { return }
-        applyPlacement(to: window, animated: true, force: false)
+        applyPlacement(to: window, animated: true, force: false, scannedObstacles: obstacles)
     }
 
-    private func applyPlacement(to window: FloatWindow, animated: Bool, force: Bool) {
+    private func applyPlacement(to window: FloatWindow, animated: Bool, force: Bool,
+                                scannedObstacles: [WeightedObstacle]? = nil) {
         guard let screen = window.screen ?? NSScreen.main else { return }
         let visible = screen.visibleFrame
-        let obstacles = scanWeightedObstacles().filter {
+        let obstacles = (scannedObstacles ?? scanWeightedObstacles()).filter {
             $0.frame.intersects(visible.insetBy(dx: -16, dy: -16))
         }
         if obstacles.isEmpty { return }

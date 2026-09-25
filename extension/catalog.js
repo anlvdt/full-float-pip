@@ -14,7 +14,7 @@ let currentSpotlightMovie = null;
 
 let heroSpotlights = [];
 let heroSpotlightIndex = 0;
-let heroRotateTimer = null;
+let homeRailResizeObserver = null;
 let favSlugSet = new Set();
 let suggestActiveIdx = -1;
 let suggestItemsCache = [];
@@ -47,6 +47,8 @@ function setListButtonState(btn, inList) {
     } else {
         btn.innerHTML = inList ? LIST_CHECK_SVG : LIST_ICON_SVG;
         btn.title = inList ? 'Bỏ khỏi danh sách' : 'Thêm vào danh sách';
+        const title = btn.closest('.movie-card')?.querySelector('.movie-title')?.textContent || 'phim';
+        btn.setAttribute('aria-label', `${inList ? 'Bỏ' : 'Thêm'} ${title} ${inList ? 'khỏi' : 'vào'} danh sách`);
     }
 }
 
@@ -551,7 +553,6 @@ async function loadHomePage() {
                 <section class="home-section" data-sec-id="${sec.id}">
                     <div class="home-section-header">
                         <div class="home-section-title-wrap">
-                            <div class="title-accent-bar"></div>
                             <div>
                                 <h3 class="home-section-title">${escapeHtml(sec.title)}</h3>
                                 <span class="home-section-subtitle">${escapeHtml(sec.subtitle || '')}</span>
@@ -561,15 +562,32 @@ async function loadHomePage() {
                     </div>
 
                     <div class="home-section-rail-wrap">
-                        <button class="rail-nav-btn rail-prev" data-target="rail-${secIdx}" aria-label="Cuộn trái">‹</button>
-                        <div id="rail-${secIdx}" class="${railClass}">
-                            ${renderMovieCardsHtml(sec.items, { isTop10: !!sec.isTop10 })}
+                        <button class="rail-nav-btn rail-prev" data-target="rail-${secIdx}" type="button" aria-label="Cuộn trái mục ${escapeAttr(sec.title)}">‹</button>
+                        <div id="rail-${secIdx}" class="${railClass}" role="region" aria-label="${escapeAttr(sec.title)}" tabindex="0">
+                            ${renderMovieCardsHtml(sec.items, { isTop10: !!sec.isTop10, isRail: true })}
                         </div>
-                        <button class="rail-nav-btn rail-next" data-target="rail-${secIdx}" aria-label="Cuộn phải">›</button>
+                        <button class="rail-nav-btn rail-next" data-target="rail-${secIdx}" type="button" aria-label="Cuộn phải mục ${escapeAttr(sec.title)}">›</button>
                     </div>
                 </section>
             `;
         }).join('');
+
+        // Keep rail controls in sync with the visible position.
+        const syncRailControls = (rail) => {
+            const wrap = rail.closest('.home-section-rail-wrap');
+            const maxScroll = rail.scrollWidth - rail.clientWidth;
+            wrap.querySelector('.rail-prev').disabled = rail.scrollLeft < 8;
+            wrap.querySelector('.rail-next').disabled = maxScroll < 8 || rail.scrollLeft >= maxScroll - 8;
+        };
+        homeRailResizeObserver?.disconnect();
+        homeRailResizeObserver = new ResizeObserver(entries => {
+            entries.forEach(({ target }) => syncRailControls(target));
+        });
+        container.querySelectorAll('.home-section-rail').forEach(rail => {
+            rail.addEventListener('scroll', () => syncRailControls(rail), { passive: true });
+            homeRailResizeObserver.observe(rail);
+            syncRailControls(rail);
+        });
 
         // Bind Rail scroll buttons
         container.querySelectorAll('.rail-nav-btn').forEach(btn => {
@@ -653,22 +671,22 @@ function renderMovieCardsHtml(items, opts = {}) {
             ? `<span class="card-rank" aria-hidden="true">${rank}</span>`
             : '';
         const inList = favSlugSet.has(item.slug);
-        const imageKind = currentViewMode === 'view-cinema' ? 'wide' : 'poster';
-        const cardClass = opts.isTop10 ? 'movie-card movie-card-top10' : 'movie-card';
+        const imageKind = opts.isRail || currentViewMode === 'view-cinema' ? 'wide' : 'poster';
+        const cardClass = `movie-card${opts.isRail ? ' movie-card-rail' : ''}${opts.isTop10 ? ' movie-card-top10' : ''}`;
 
         return `
-            <div class="${cardClass}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}">
+            <div class="${cardClass}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" role="group" aria-label="${escapeAttr(item.name)}" tabindex="0">
                 <div class="movie-poster-wrap">
                     ${rankHtml}
-                    <img class="movie-poster" loading="lazy" ${MovieImages.attr(item, imageKind)} alt="${escapeAttr(item.name)}">
+                    <img class="movie-poster" loading="lazy" ${MovieImages.attr(item, imageKind)} alt="" width="320" height="180">
                     <div class="card-badges-top">${badges.join('')}</div>
                     ${ratingBadge}
                     ${epBadge}
                     <div class="card-hover-actions">
-                        <button type="button" class="card-action-btn card-quick-float" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="Phát nổi — Tập sau tự động / Bỏ qua GT trong PiP">
+                        <button type="button" class="card-action-btn card-quick-float" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="Phát nổi — Tập sau tự động / Bỏ qua GT trong PiP" aria-label="Phát nổi ${escapeAttr(item.name)}">
                             ${PLAY_ICON_SVG}<span>Phát nổi</span>
                         </button>
-                        <button type="button" class="card-action-btn card-mylist-btn ${inList ? 'is-listed' : ''}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="${inList ? 'Bỏ khỏi danh sách' : 'Thêm vào danh sách'}" aria-pressed="${inList ? 'true' : 'false'}">
+                        <button type="button" class="card-action-btn card-mylist-btn ${inList ? 'is-listed' : ''}" data-slug="${escapeAttr(item.slug)}" data-source="${escapeAttr(item.source || currentSource)}" title="${inList ? 'Bỏ khỏi danh sách' : 'Thêm vào danh sách'}" aria-label="${inList ? 'Bỏ' : 'Thêm'} ${escapeAttr(item.name)} ${inList ? 'khỏi' : 'vào'} danh sách" aria-pressed="${inList ? 'true' : 'false'}">
                             ${inList ? LIST_CHECK_SVG : LIST_ICON_SVG}
                         </button>
                     </div>
@@ -756,6 +774,11 @@ function bindCardClicks(container) {
             const source = card.dataset.source || currentSource;
             openMovieDetail(slug, source);
         });
+        card.addEventListener('keydown', (event) => {
+            if (event.target !== card || !['Enter', ' '].includes(event.key)) return;
+            event.preventDefault();
+            openMovieDetail(card.dataset.slug, card.dataset.source || currentSource);
+        });
     });
 }
 
@@ -842,10 +865,8 @@ async function quickFloatMovie(slug, source) {
 
 // MARK: - Cinema Hero Spotlight
 function stopHeroRotation() {
-    if (heroRotateTimer) {
-        clearInterval(heroRotateTimer);
-        heroRotateTimer = null;
-    }
+    heroSpotlights = [];
+    heroSpotlightIndex = 0;
 }
 
 function startHeroRotation(spots) {
@@ -855,13 +876,6 @@ function startHeroRotation(spots) {
     if (!heroSpotlights.length) return;
     renderHeroSpotlight(heroSpotlights[0]);
     renderHeroDots();
-    if (heroSpotlights.length > 1) {
-        heroRotateTimer = setInterval(() => {
-            heroSpotlightIndex = (heroSpotlightIndex + 1) % heroSpotlights.length;
-            renderHeroSpotlight(heroSpotlights[heroSpotlightIndex], { soft: true });
-            updateHeroDots();
-        }, 7500);
-    }
 }
 
 function renderHeroDots() {
@@ -874,7 +888,7 @@ function renderHeroDots() {
     }
     dots.hidden = false;
     dots.innerHTML = heroSpotlights.map((_, i) =>
-        `<button type="button" class="hero-dot ${i === heroSpotlightIndex ? 'active' : ''}" data-idx="${i}" aria-label="Spotlight ${i + 1}"></button>`
+        `<button type="button" class="hero-dot ${i === heroSpotlightIndex ? 'active' : ''}" data-idx="${i}" aria-label="Phim nổi bật ${i + 1}: ${escapeAttr(heroSpotlights[i].name)}" aria-pressed="${i === heroSpotlightIndex}"></button>`
     ).join('');
     dots.querySelectorAll('.hero-dot').forEach(btn => {
         btn.addEventListener('click', () => {
@@ -882,15 +896,6 @@ function renderHeroDots() {
             heroSpotlightIndex = idx;
             renderHeroSpotlight(heroSpotlights[idx], { soft: true });
             updateHeroDots();
-            // restart timer
-            stopHeroRotation();
-            if (heroSpotlights.length > 1) {
-                heroRotateTimer = setInterval(() => {
-                    heroSpotlightIndex = (heroSpotlightIndex + 1) % heroSpotlights.length;
-                    renderHeroSpotlight(heroSpotlights[heroSpotlightIndex], { soft: true });
-                    updateHeroDots();
-                }, 7500);
-            }
         });
     });
 }
@@ -900,6 +905,7 @@ function updateHeroDots() {
     if (!dots) return;
     dots.querySelectorAll('.hero-dot').forEach((btn, i) => {
         btn.classList.toggle('active', i === heroSpotlightIndex);
+        btn.setAttribute('aria-pressed', i === heroSpotlightIndex ? 'true' : 'false');
     });
 }
 
@@ -920,7 +926,7 @@ function renderHeroSpotlight(spot, opts = {}) {
 
     const backdropEl = document.getElementById('hero-backdrop');
     if (backdropEl) {
-        MovieImages.applyBackground(backdropEl, spot, 'hero');
+        MovieImages.apply(backdropEl, { poster: spot.thumb, thumb: spot.poster }, 'hero');
     }
 
     document.getElementById('hero-title').textContent = spot.name;
@@ -986,7 +992,7 @@ async function loadContinueWatching() {
             : '';
         return `
         <button type="button" class="continue-card" data-idx="${idx}" title="Phát nổi tiếp — ${escapeAttr(item.name)}">
-            <img class="continue-thumb" ${MovieImages.attr(item, 'poster')} width="44" height="60" alt="">
+            <img class="continue-thumb" loading="lazy" ${MovieImages.attr(item, 'wide')} width="280" height="158" alt="">
             <span class="continue-info">
                 <span class="continue-title" title="${escapeAttr(item.name)}">${escapeHtml(item.name)}</span>
                 <span class="continue-ep">${escapeHtml(item.epName || 'Tập 1')}</span>

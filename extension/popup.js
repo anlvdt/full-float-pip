@@ -1,26 +1,41 @@
 // popup.js — Popup panel logic with Web Video Detection & VibeWatch Cinema Movie Hub (No Emojis, Clean UI/UX, TikTok VN Infinite Scroll)
 
-let currentPopupTab = 'movies';
+let currentPopupTab = 'web';
 let popupMovieSource = 'all';
 let popupCategory = 'moi';
 let currentSearchKeyword = '';
 
 document.addEventListener('DOMContentLoaded', async () => {
     MovieImages.install(document);
-    initTabs();
     initFilterChips();
     initMoviePanel();
     initTikTokPanel();
     initRecentPanel();
     initLofiCoding();
-    await initWebVideoPanel();
-    // Ensure Kho Phim list paints on first open (default tab)
-    loadPopupContinueStrip();
-    loadPopupMovies();
+    initShortcutControls();
+    await initTabs();
 });
 
+async function initShortcutControls() {
+    const shortcut = document.getElementById('float-shortcut');
+    try {
+        const commands = await chrome.commands.getAll();
+        const assigned = commands.find(command => command.name === 'float-current-video')?.shortcut;
+        shortcut.textContent = assigned ? assigned
+            .replaceAll('Command', '⌘').replaceAll('MacCtrl', '⌃')
+            .replaceAll('Ctrl', '⌃').replaceAll('Shift', '⇧')
+            .replaceAll('Alt', '⌥').replaceAll('+', '') : 'Chưa gán';
+    } catch {
+        shortcut.textContent = 'Xem trong Chrome';
+    }
+    document.getElementById('change-shortcut-btn')?.addEventListener('click', () => {
+        chrome.tabs.create({ url: 'chrome://extensions/shortcuts' });
+    });
+    document.getElementById('web-rescan-btn')?.addEventListener('click', () => initWebVideoPanel());
+}
+
 // MARK: - Tabs Initialization
-function initTabs() {
+async function initTabs() {
     const tabWeb = document.getElementById('tab-web');
     const tabMovies = document.getElementById('tab-movies');
     const tabTikTok = document.getElementById('tab-tiktok');
@@ -30,34 +45,47 @@ function initTabs() {
     const panelTikTok = document.getElementById('panel-tiktok');
     const panelRecent = document.getElementById('panel-recent');
 
-    function setActiveTab(name) {
+    function setActiveTab(name, remember = true) {
         currentPopupTab = name;
-        [tabWeb, tabMovies, tabTikTok, tabRecent].forEach(t => t?.classList.remove('active'));
-        [panelWeb, panelMovies, panelTikTok, panelRecent].forEach(p => p?.classList.remove('active'));
+        const tabs = { web: tabWeb, movies: tabMovies, tiktok: tabTikTok, recent: tabRecent };
+        const panels = { web: panelWeb, movies: panelMovies, tiktok: panelTikTok, recent: panelRecent };
+        for (const [key, button] of Object.entries(tabs)) {
+            button?.classList.toggle('active', key === name);
+            button?.setAttribute('aria-selected', key === name ? 'true' : 'false');
+            if (button) button.tabIndex = key === name ? 0 : -1;
+            panels[key]?.classList.toggle('active', key === name);
+        }
+        if (remember) chrome.storage.local.set({ vibe_popup_tab: name }).catch(() => {});
 
         if (name === 'web') {
-            tabWeb?.classList.add('active');
-            panelWeb?.classList.add('active');
+            initWebVideoPanel();
         } else if (name === 'movies') {
-            tabMovies?.classList.add('active');
-            panelMovies?.classList.add('active');
             loadPopupContinueStrip();
             loadPopupMovies(currentSearchKeyword);
-        } else if (name === 'tiktok') {
-            tabTikTok?.classList.add('active');
-            panelTikTok?.classList.add('active');
         } else if (name === 'recent') {
-            tabRecent?.classList.add('active');
-            panelRecent?.classList.add('active');
             renderRecentPanel();
         }
     }
 
+    const tabOrder = ['web', 'movies', 'tiktok', 'recent'];
+    for (const [name, button] of Object.entries({ web: tabWeb, movies: tabMovies, tiktok: tabTikTok, recent: tabRecent })) {
+        button?.addEventListener('keydown', (event) => {
+            if (!['ArrowLeft', 'ArrowRight', 'Home', 'End'].includes(event.key)) return;
+            event.preventDefault();
+            const current = tabOrder.indexOf(name);
+            const next = event.key === 'Home' ? 0 : event.key === 'End' ? tabOrder.length - 1
+                : (current + (event.key === 'ArrowRight' ? 1 : -1) + tabOrder.length) % tabOrder.length;
+            const nextName = tabOrder[next];
+            setActiveTab(nextName);
+            ({ web: tabWeb, movies: tabMovies, tiktok: tabTikTok, recent: tabRecent })[nextName]?.focus();
+        });
+    }
     tabWeb?.addEventListener('click', () => setActiveTab('web'));
     tabMovies?.addEventListener('click', () => setActiveTab('movies'));
     tabTikTok?.addEventListener('click', () => setActiveTab('tiktok'));
     tabRecent?.addEventListener('click', () => setActiveTab('recent'));
-    setActiveTab('movies');
+    const saved = await chrome.storage.local.get('vibe_popup_tab').catch(() => ({}));
+    setActiveTab(['web', 'movies', 'tiktok', 'recent'].includes(saved.vibe_popup_tab) ? saved.vibe_popup_tab : 'web', false);
 
     // Ghost Mode Quick Toggle — sync real native state
     const ghostBtn = document.getElementById('popup-ghost-btn');
@@ -66,7 +94,8 @@ function initTabs() {
         isGhost = !!on;
         ghostBtn?.classList.toggle('active', isGhost);
         if (ghostBtn) {
-            ghostBtn.textContent = isGhost ? 'Xuyên chuột: Bật' : 'Xuyên chuột: Tắt';
+            ghostBtn.querySelector('.ghost-state').textContent = isGhost ? 'Bật' : 'Tắt';
+            ghostBtn.setAttribute('aria-label', `Xuyên chuột: ${isGhost ? 'Bật' : 'Tắt'}`);
             ghostBtn.setAttribute('aria-pressed', isGhost ? 'true' : 'false');
         }
     };
@@ -81,6 +110,7 @@ function initTabs() {
     });
 
     ghostBtn?.addEventListener('click', async () => {
+        ghostBtn.disabled = true;
         try {
             const res = await chrome.runtime.sendMessage({
                 type: 'NATIVE_COMMAND',
@@ -88,11 +118,15 @@ function initTabs() {
             });
             if (typeof res?.isGhost === 'boolean') {
                 syncGhostBtn(res.isGhost);
-            } else if (res?.success !== false) {
+            } else if (res?.success) {
                 syncGhostBtn(!isGhost);
+            } else {
+                showFloatErrorHint(formatFloatError(res));
             }
         } catch (e) {
-            console.error(e);
+            showFloatErrorHint(e?.message || 'Không đổi được chế độ xuyên chuột.');
+        } finally {
+            ghostBtn.disabled = false;
         }
     });
 
@@ -164,48 +198,50 @@ async function floatLofiCoding() {
 }
 
 // MARK: - Panel 1: Web Video Detection (Original FullFloatPiP)
+let webScanRequest = 0;
 async function initWebVideoPanel() {
+    const request = ++webScanRequest;
     const videoList = document.getElementById('video-list');
-
-    const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
-    if (!tab || !tab.id) {
-        videoList.innerHTML = '<div class="empty">Không thể truy cập tab hiện tại</div>';
-        return;
-    }
-
-    if (!tab.url || tab.url.startsWith('chrome://') || tab.url.startsWith('chrome-extension://')) {
-        videoList.innerHTML = '<div class="empty">Không hỗ trợ quét trên trang nội bộ trình duyệt.<br><span style="font-size:10.5px;color:#888;margin-top:6px;display:block;">Hãy mở YouTube / Web Video hoặc chuyển sang tab "Kho Phim" để xem phim.</span></div>';
-        return;
-    }
+    const status = document.getElementById('web-status');
+    const rescan = document.getElementById('web-rescan-btn');
+    status.textContent = 'Đang tìm video…';
+    rescan.disabled = true;
+    videoList.innerHTML = '<div class="loading"><div class="spinner"></div><span>Đang quét tab hiện tại…</span></div>';
 
     try {
-        const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
-        renderVideos(response?.videos || []);
-    } catch (e) {
-        try {
-            await chrome.scripting.executeScript({
-                target: { tabId: tab.id },
-                files: ['content.js'],
-            });
-            setTimeout(async () => {
-                try {
-                    const response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
-                    renderVideos(response?.videos || []);
-                } catch {
-                    videoList.innerHTML = '<div class="empty">Không phát hiện video trên trang này<br><span style="font-size:10.5px;color:#888;margin-top:6px;display:block;">Bấm play video trên trang hoặc duyệt tab "Kho Phim"</span></div>';
-                }
-            }, 800);
-        } catch {
-            videoList.innerHTML = '<div class="error">Không thể chèn script quét video vào trang này.</div>';
-        }
-    }
-
-    function renderVideos(videos) {
-        if (!videos || videos.length === 0) {
-            videoList.innerHTML = '<div class="empty">Không phát hiện video nào<br><span style="font-size:10.5px;color:#888;margin-top:6px;display:block;">Hãy mở tab YouTube / Bilibili hoặc sang tab "Kho Phim"</span></div>';
+        const [tab] = await chrome.tabs.query({ active: true, currentWindow: true });
+        if (request !== webScanRequest) return;
+        if (!tab?.id || !/^https?:/.test(tab.url || '')) {
+            status.textContent = 'Không thể quét tab này';
+            videoList.innerHTML = '<div class="empty">Mở một trang có video trong Chrome rồi bấm Quét lại.</div>';
             return;
         }
 
+        let response;
+        try {
+            response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
+        } catch {
+            await chrome.scripting.executeScript({ target: { tabId: tab.id }, files: ['content.js'] });
+            response = await chrome.tabs.sendMessage(tab.id, { type: 'GET_VIDEOS' });
+        }
+        if (request === webScanRequest) renderVideos(tab, response?.videos || []);
+    } catch (error) {
+        if (request !== webScanRequest) return;
+        status.textContent = 'Không thể quét video';
+        videoList.innerHTML = '<div class="error">Không thể quét trang này. Hãy tải lại trang rồi thử lại.</div>';
+    } finally {
+        if (request === webScanRequest) rescan.disabled = false;
+    }
+
+    function renderVideos(tab, videos) {
+        if (!videos || videos.length === 0) {
+            status.textContent = 'Chưa tìm thấy video';
+            videoList.innerHTML = '<div class="empty">Bấm phát video trên trang rồi chọn Quét lại.</div>';
+            return;
+        }
+
+        status.textContent = `Đã tìm thấy ${videos.length} video`;
+        videos = [...videos].sort((a, b) => Number(a.paused) - Number(b.paused));
         videoList.innerHTML = '';
         videos.forEach((video, index) => {
             const card = document.createElement('div');
@@ -213,10 +249,10 @@ async function initWebVideoPanel() {
             card.innerHTML = `
                 <div class="video-info">
                   <span class="video-title" title="${escapeAttr(video.title)}">${escapeHtml(video.title)}</span>
-                  <span class="video-meta">${video.width}×${video.height} · ${formatDuration(video.duration)}</span>
+                  <span class="video-meta">${video.paused ? 'Tạm dừng' : 'Đang phát'} · ${video.width}×${video.height} · ${formatDuration(video.duration)}</span>
                   <span class="video-site">${escapeHtml(video.site)}</span>
                 </div>
-                <button class="float-btn" data-index="${index}">
+                <button class="float-btn" data-index="${index}" aria-label="Phát nổi ${escapeAttr(video.title)}">
                   Phát nổi
                 </button>
             `;
@@ -234,11 +270,6 @@ async function initWebVideoPanel() {
 
                 try {
                     const playerPrefs = await capturePlayerPrefs(tab.id, video.site);
-                    await chrome.tabs.sendMessage(tab.id, {
-                        type: 'FLOAT_VIDEO',
-                        videoIndex: index,
-                    });
-
                     const result = await chrome.runtime.sendMessage({
                         type: 'FLOAT_VIDEO_REQUEST',
                         videoInfo: video,
@@ -246,6 +277,7 @@ async function initWebVideoPanel() {
                     });
 
                     if (result?.success) {
+                        await chrome.tabs.sendMessage(tab.id, { type: 'FLOAT_VIDEO', videoIndex: video.index }).catch(() => {});
                         button.textContent = 'Đang phát';
                         setTimeout(() => window.close(), 300);
                     } else {
@@ -321,7 +353,7 @@ async function loadPopupContinueStrip() {
     }
 
     strip.classList.remove('hidden');
-    rail.innerHTML = items.slice(0, 6).map((item, idx) => {
+    rail.innerHTML = items.slice(0, 2).map((item, idx) => {
         const pct = MovieService.progressPercent(item);
         const progressHtml = pct > 0
             ? `<div class="popup-cont-progress"><div class="popup-cont-bar" style="width:${pct}%"></div></div>`
@@ -354,7 +386,9 @@ async function loadPopupContinueStrip() {
     });
 }
 
+let popupMovieRequest = 0;
 async function loadPopupMovies(keyword = '') {
+    const request = ++popupMovieRequest;
     const list = document.getElementById('popup-movie-list');
     list.innerHTML = '<div class="loading"><div class="spinner"></div><span>Đang tải danh sách phim...</span></div>';
 
@@ -368,8 +402,9 @@ async function loadPopupMovies(keyword = '') {
             items = await MovieService.getLatest(popupMovieSource, popupCategory, 1);
         }
 
-        renderPopupMovies(items.slice(0, 15));
+        if (request === popupMovieRequest) renderPopupMovies(items.slice(0, keyword ? 8 : 5));
     } catch (err) {
+        if (request !== popupMovieRequest) return;
         console.error('Failed to load popup movies:', err);
         list.innerHTML = `<div class="empty">Lỗi tải phim từ nguồn ${popupMovieSource.toUpperCase()}. Hãy thử chọn nguồn khác.</div>`;
     }
@@ -962,7 +997,10 @@ function showFloatErrorHint(message) {
     if (!hint) {
         hint = document.createElement('div');
         hint.className = 'float-error-hint';
-        active.prepend(hint);
+        hint.setAttribute('role', 'alert');
+        const videoList = active.id === 'panel-web' ? document.getElementById('video-list') : null;
+        if (videoList) videoList.after(hint);
+        else active.prepend(hint);
     }
     hint.textContent = message;
     clearTimeout(hint._hideTimer);

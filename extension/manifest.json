@@ -24,8 +24,7 @@
     "https://phim.nguonc.com/*",
     "https://*.nguonc.com/*",
     "https://*.streamc.xyz/*",
-    "https://phimimg.com/*",
-    "https://*/*"
+    "https://phimimg.com/*"
   ],
   "background": {
     "service_worker": "background.js"
@@ -41,8 +40,7 @@
         "*://*.netflix.com/*",
         "*://*.v.qq.com/*",
         "*://*.douyin.com/*",
-        "*://*.twitch.tv/*",
-        "*://*/*"
+        "*://*.twitch.tv/*"
       ],
       "js": [
         "content.js"
@@ -56,6 +54,12 @@
       "16": "icons/icon16.png",
       "48": "icons/icon48.png",
       "128": "icons/icon128.png"
+    }
+  },
+  "commands": {
+    "float-current-video": {
+      "suggested_key": { "default": "Ctrl+Shift+Y", "mac": "MacCtrl+Shift+Y" },
+      "description": "Phát nổi video đang xem trên tab hiện tại"
     }
   },
   "icons": {

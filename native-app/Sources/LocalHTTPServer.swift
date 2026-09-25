@@ -8,12 +8,14 @@ class LocalHTTPServer {
     private var listener: NWListener?
     private(set) var port: UInt16 = 0
     private var isReady = false
+    private let apiToken = UUID().uuidString
 
     var onCommand: ((String, [String: String]) -> [String: Any]?)?
 
     func start(completion: @escaping (UInt16) -> Void) {
         do {
             let params = NWParameters.tcp
+            params.requiredLocalEndpoint = .hostPort(host: "127.0.0.1", port: .any)
             listener = try NWListener(using: params, on: .any)
         } catch {
             NSLog("[FloatVideo] HTTP server failed to create listener: \(error)")
@@ -30,7 +32,14 @@ class LocalHTTPServer {
                     // Save port for CLI & Agent hooks
                     let home = FileManager.default.homeDirectoryForCurrentUser
                     let portFile = home.appendingPathComponent(".floatvideo_port")
+                    let tokenFile = home.appendingPathComponent(".floatvideo_token")
                     try? "\(port)".write(to: portFile, atomically: true, encoding: .utf8)
+                    _ = FileManager.default.createFile(
+                        atPath: tokenFile.path,
+                        contents: self?.apiToken.data(using: .utf8),
+                        attributes: [.posixPermissions: 0o600]
+                    )
+                    try? FileManager.default.setAttributes([.posixPermissions: 0o600], ofItemAtPath: tokenFile.path)
                     completion(port)
                 }
             case .failed(let error):
@@ -51,6 +60,8 @@ class LocalHTTPServer {
         listener?.cancel()
         listener = nil
         isReady = false
+        let tokenFile = FileManager.default.homeDirectoryForCurrentUser.appendingPathComponent(".floatvideo_token")
+        try? FileManager.default.removeItem(at: tokenFile)
         NSLog("[FloatVideo] HTTP server stopped")
     }
 
@@ -92,6 +103,12 @@ class LocalHTTPServer {
         } else if path == "/health" {
             sendResponse(connection: connection, body: "OK", contentType: "text/plain")
         } else if path.hasPrefix("/api/") {
+            let token = lines.first(where: { $0.lowercased().hasPrefix("x-vibefloat-token:") })?
+                .split(separator: ":", maxSplits: 1).last?.trimmingCharacters(in: .whitespaces)
+            guard token == apiToken else {
+                sendErrorResponse(connection: connection, code: 403, message: "Forbidden")
+                return
+            }
             handleApiRequest(path: path, connection: connection)
         } else {
             sendErrorResponse(connection: connection, code: 404, message: "Not Found")
@@ -133,26 +150,20 @@ class LocalHTTPServer {
         let videoId = queryItems.first(where: { $0.name == "v" })?.value ?? ""
         let site = queryItems.first(where: { $0.name == "site" })?.value ?? "youtube"
         let startTime = queryItems.first(where: { $0.name == "t" })?.value ?? "0"
-        let safeWidth = max(Int(queryItems.first(where: { $0.name == "w" })?.value ?? "") ?? 640, 200)
-        let safeHeight = max(Int(queryItems.first(where: { $0.name == "h" })?.value ?? "") ?? 360, 200)
+        let safeWidth = min(max(Int(queryItems.first(where: { $0.name == "w" })?.value ?? "") ?? 640, 200), 1920)
+        let safeHeight = min(max(Int(queryItems.first(where: { $0.name == "h" })?.value ?? "") ?? 360, 200), 1080)
 
-        if videoId.isEmpty {
-            sendErrorResponse(connection: connection, code: 400, message: "Missing video ID")
+        guard site == "youtube", videoId.range(of: "^[A-Za-z0-9_-]{11}$", options: .regularExpression) != nil else {
+            sendErrorResponse(connection: connection, code: 400, message: "Invalid video ID")
             return
         }
 
-        let html: String
-        switch site {
-        case "youtube":
-            html = buildYouTubePlayerHTML(
-                videoId: videoId,
-                startTime: startTime,
-                safeWidth: safeWidth,
-                safeHeight: safeHeight
-            )
-        default:
-            html = buildGenericEmbedHTML(videoId: videoId)
-        }
+        let html = buildYouTubePlayerHTML(
+            videoId: videoId,
+            startTime: startTime,
+            safeWidth: safeWidth,
+            safeHeight: safeHeight
+        )
 
         sendResponse(connection: connection, body: html, contentType: "text/html; charset=utf-8")
     }
@@ -337,7 +348,6 @@ class LocalHTTPServer {
         HTTP/1.1 200 OK\r
         Content-Type: \(contentType)\r
         Content-Length: \(bodyData.count)\r
-        Access-Control-Allow-Origin: *\r
         Connection: close\r
         \r
 
